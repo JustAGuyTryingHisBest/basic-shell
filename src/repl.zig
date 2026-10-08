@@ -34,9 +34,30 @@ pub fn run(init: std.process.Init) !void {
         };
 
         _ = line_arena.reset(.retain_capacity);
-        const words = try lexer.splitWords(line_arena.allocator(), line);
+        const words = lexer.splitWords(line_arena.allocator(), line) catch |err| switch (err) {
+            error.UnterminatedSingleQuote,
+            error.UnterminatedDoubleQuote,
+            error.TrailingBackslash,
+            => |syntax_err| {
+                try shell_ctx.reportError("syntax error: {s}", .{describeSyntaxError(syntax_err)});
+                // Matches bash and dash, which use 2 for syntax errors.
+                shell_ctx.last_exit_status = 2;
+                continue;
+            },
+            error.OutOfMemory => |fatal_err| return fatal_err,
+        };
         try exec.runCommand(&shell_ctx, words);
     }
+}
+
+fn describeSyntaxError(syntax_err: lexer.SplitWordsError) []const u8 {
+    return switch (syntax_err) {
+        error.UnterminatedSingleQuote => "unterminated single quote",
+        error.UnterminatedDoubleQuote => "unterminated double quote",
+        // Line continuation needs a second prompt (PS2), which isn't implemented yet.
+        error.TrailingBackslash => "line ends with a backslash",
+        error.OutOfMemory => unreachable,
+    };
 }
 
 fn printPrompt(stdout: *std.Io.Writer) !void {
