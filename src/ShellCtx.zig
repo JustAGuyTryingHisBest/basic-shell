@@ -18,10 +18,14 @@ stdin_file_reader: std.Io.File.Reader,
 stdout_file_writer: std.Io.File.Writer,
 stderr_file_writer: std.Io.File.Writer,
 
-pub fn init(ctx: *ShellCtx, io: std.Io) void {
+// this is NOT threadsafe.
+env_vars: *std.process.Environ.Map,
+
+pub fn init(ctx: *ShellCtx, io: std.Io, env_vars: *std.process.Environ.Map) void {
     ctx.stdin_file_reader = .init(.stdin(), io, &ctx.stdin_buffer);
     ctx.stdout_file_writer = .init(.stdout(), io, &ctx.stdout_buffer);
     ctx.stderr_file_writer = .init(.stderr(), io, &ctx.stderr_buffer);
+    ctx.env_vars = env_vars;
 }
 
 pub fn stdin(ctx: *ShellCtx) *std.Io.Reader {
