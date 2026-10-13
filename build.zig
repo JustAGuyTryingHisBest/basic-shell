@@ -66,4 +66,41 @@ pub fn build(b: *std.Build) void {
     var ctx: ShellBuildCtx = undefined;
     setup_build(b, &ctx);
     setup_tests(&ctx);
+    setup_script_tests(&ctx);
+    setup_size_report(&ctx);
+}
+
+fn setup_script_tests(ctx: *ShellBuildCtx) void {
+    const b: *std.Build = ctx.b;
+    const run_scripts = b.addSystemCommand(&.{"sh"});
+    run_scripts.addFileArg(b.path("tests/run-scripts.sh"));
+    run_scripts.addArtifactArg(ctx.exe);
+    // The scripts read files the build system does not track.
+    run_scripts.has_side_effects = true;
+    const script_test_step = b.step("test-scripts", "Run the golden .bs scripts against the built binary");
+    script_test_step.dependOn(&run_scripts.step);
+}
+
+fn setup_size_report(ctx: *ShellBuildCtx) void {
+    const b: *std.Build = ctx.b;
+    const mips_target = b.resolveTargetQuery(.{ .cpu_arch = .mips, .os_tag = .linux });
+    const mips_shell_module = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = mips_target,
+        .optimize = .ReleaseSmall,
+    });
+    const mips_executable = b.addExecutable(.{
+        .name = "bs",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = mips_target,
+            .optimize = .ReleaseSmall,
+            .strip = true,
+            .imports = &.{.{ .name = "shell", .module = mips_shell_module }},
+        }),
+    });
+    const report_size = b.addSystemCommand(&.{ "wc", "-c" });
+    report_size.addArtifactArg(mips_executable);
+    const size_step = b.step("size", "Report the size of a stripped ReleaseSmall mips-linux binary");
+    size_step.dependOn(&report_size.step);
 }

@@ -1,0 +1,10 @@
+#!/usr/bin/bs
+greeting = "hello"
+
+greet :: String -> IO Status
+greet who = echo "$greeting, $who"
+
+main = {
+  greet "world"
+  greet (printf "%s" there)
+}

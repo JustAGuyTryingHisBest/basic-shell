@@ -1,0 +1,5 @@
+count n = match lt n 100000 {
+  True  -> count (add n 1)
+  False -> echo "counted to $n"
+}
+count 0

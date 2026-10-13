@@ -1,0 +1,3 @@
+echo hello world
+printf "%s|%s\n" one "two words"
+echo after

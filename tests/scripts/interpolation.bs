@@ -1,0 +1,5 @@
+name = "eth0"
+echo "dev=$name" dev=$name ${name}_x '$name'
+items = ["a", "b c"]
+printf "<%s>\n" $items
+echo "joined: $items"

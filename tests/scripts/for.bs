@@ -1,0 +1,1 @@
+for (lines (printf "x\ny\n")) \item -> echo "item $item"

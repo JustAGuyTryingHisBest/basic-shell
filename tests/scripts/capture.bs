@@ -1,0 +1,6 @@
+word = printf hello
+echo "got $word"
+line = printf "a\n"
+echo "[$line]"
+kept = printf "a\n\n"
+echo "[$kept]"

@@ -1,0 +1,5 @@
+deep n = match lt n 1000000 {
+  True  -> { deep (add n 1); skip }
+  False -> skip
+}
+deep 0

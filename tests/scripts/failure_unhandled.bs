@@ -1,0 +1,3 @@
+echo before
+sh -c "exit 3"
+echo after

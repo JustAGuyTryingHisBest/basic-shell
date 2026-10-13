@@ -1,0 +1,3 @@
+syntax_error.bs:1:6: error: unterminated single quote
+    1 | echo 'unterminated
+      |      ^

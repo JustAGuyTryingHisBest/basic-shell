@@ -1,0 +1,10 @@
+deploy step = {
+  echo "deploying $step"
+  false
+  echo "not reached"
+}
+
+match deploy "one" {
+  Ok        -> echo "deployed"
+  Fail code -> echo "caught status $code"
+}

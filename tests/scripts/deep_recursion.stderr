@@ -1,0 +1,3 @@
+deep_recursion.bs:2:14: error: recursion too deep
+    2 |   True  -> { deep (add n 1); skip }
+      |              ^
