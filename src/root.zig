@@ -11,6 +11,7 @@ test {
     _ = @import("builtins.zig");
     _ = @import("Source.zig");
     _ = @import("diagnostics.zig");
+    _ = @import("eval.zig");
     _ = @import("exec.zig");
     _ = @import("lexer.zig");
     _ = @import("parser.zig");
