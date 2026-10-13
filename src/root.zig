@@ -3,7 +3,7 @@ const std = @import("std");
 
 pub const ShellCtx = @import("ShellCtx.zig");
 pub const signals = @import("signals.zig");
-pub const main = @import("repl.zig").run;
+pub const main = @import("run.zig").main;
 
 test {
     std.testing.refAllDecls(@This());
@@ -17,5 +17,6 @@ test {
     _ = @import("parser.zig");
     _ = @import("prompt_words.zig");
     _ = @import("resolve.zig");
+    _ = @import("run.zig");
     _ = @import("value.zig");
 }

@@ -36,7 +36,7 @@ fn setup_build(b: *std.Build, ctx: *ShellBuildCtx) void {
         .target = target,
     });
     const exe = b.addExecutable(.{
-        .name = "shell",
+        .name = "bs",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,

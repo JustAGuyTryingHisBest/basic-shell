@@ -1,6 +1,6 @@
 const std = @import("std");
 const shell = @import("shell");
 
-pub fn main(init: std.process.Init) !void {
-    try shell.main(init);
+pub fn main(init: std.process.Init) !u8 {
+    return shell.main(init);
 }
