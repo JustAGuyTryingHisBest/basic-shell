@@ -7,4 +7,7 @@ pub const main = @import("repl.zig").run;
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("Source.zig");
+    _ = @import("diagnostics.zig");
+    _ = @import("prompt_words.zig");
 }

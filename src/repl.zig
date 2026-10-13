@@ -3,7 +3,7 @@ const std = @import("std");
 
 const ShellCtx = @import("ShellCtx.zig");
 const exec = @import("exec.zig");
-const lexer = @import("lexer.zig");
+const prompt_words = @import("prompt_words.zig");
 const signals = @import("signals.zig");
 
 /// Runs the interactive read loop until end of input or a termination signal.
@@ -34,7 +34,7 @@ pub fn run(init: std.process.Init) !void {
         };
 
         _ = line_arena.reset(.retain_capacity);
-        const words = lexer.splitWords(line_arena.allocator(), line) catch |err| switch (err) {
+        const words = prompt_words.splitWords(line_arena.allocator(), line) catch |err| switch (err) {
             error.UnterminatedSingleQuote,
             error.UnterminatedDoubleQuote,
             error.TrailingBackslash,
@@ -50,7 +50,7 @@ pub fn run(init: std.process.Init) !void {
     }
 }
 
-fn describeSyntaxError(syntax_err: lexer.SplitWordsError) []const u8 {
+fn describeSyntaxError(syntax_err: prompt_words.SplitWordsError) []const u8 {
     return switch (syntax_err) {
         error.UnterminatedSingleQuote => "unterminated single quote",
         error.UnterminatedDoubleQuote => "unterminated double quote",
