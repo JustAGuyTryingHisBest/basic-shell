@@ -9,6 +9,7 @@ const parser = @import("parser.zig");
 const repl = @import("repl.zig");
 const resolve = @import("resolve.zig");
 const ShellCtx = @import("ShellCtx.zig");
+const signals = @import("signals.zig");
 const Source = @import("Source.zig");
 
 const Allocator = std.mem.Allocator;
@@ -25,6 +26,8 @@ pub fn main(init: std.process.Init) !u8 {
 
     var shell_ctx: ShellCtx = undefined;
     shell_ctx.init(init.io, init.environ_map);
+    // Script mode uses default signal dispositions (spec §8.6).
+    signals.restoreDefaultPipeSignal();
 
     var source: Source = undefined;
     var first_script_argument: usize = undefined;
@@ -37,7 +40,7 @@ pub fn main(init: std.process.Init) !u8 {
         first_script_argument = 3;
     } else {
         source = Source.load(init.io, arena.allocator(), command_line[1]) catch |err| {
-            try shell_ctx.reportError("{s}: {s}", .{ command_line[1], @errorName(err) });
+            try shell_ctx.reportError("{s}: {s}", .{ command_line[1], ShellCtx.describeFileError(err) });
             return 127;
         };
         first_script_argument = 2;
@@ -45,7 +48,10 @@ pub fn main(init: std.process.Init) !u8 {
 
     const script_arguments = try arena.allocator().alloc([]const u8, command_line.len - first_script_argument);
     for (script_arguments, command_line[first_script_argument..]) |*script_argument, argument| script_argument.* = argument;
-    return runSource(init.gpa, &shell_ctx, shell_ctx.stdout(), shell_ctx.stderr(), source, script_arguments);
+    return runSource(init.gpa, &shell_ctx, shell_ctx.stdout(), shell_ctx.stderr(), source, script_arguments) catch |err| {
+        shell_ctx.reportError("{s}", .{@errorName(err)}) catch {};
+        return 1;
+    };
 }
 
 /// Lexes, parses, resolves and runs `source`, and returns the exit status
@@ -78,7 +84,8 @@ pub fn runSource(
     interpreter.init(.{ .gpa = gpa, .shell_ctx = shell_ctx, .stdout = stdout, .stderr = stderr, .source = source });
     defer interpreter.deinit();
     interpreter.runScript(script, script_arguments) catch |err| {
-        try stdout.flush();
+        // The output may be going to a closed pipe; the status matters more.
+        stdout.flush() catch {};
         switch (err) {
             error.ScriptExit => return interpreter.exit_status,
             // The message was printed when the error happened.
@@ -169,6 +176,21 @@ test "an unhandled failure is reported with its line and status" {
     try std.testing.expectEqual(@as(u8, 3), result.exit_status);
     try std.testing.expectEqualStrings("before\n", result.stdout);
     try std.testing.expectEqualStrings("test.bs:2: 'Fail 3' failed with status 3\n", result.stderr);
+}
+
+test "an unhandled Fail 0 or Fail 256 still exits non-zero" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectEqual(@as(u8, 1), (try runForTest(arena.allocator(), "Fail 256\n", &.{})).exit_status);
+    try std.testing.expectEqual(@as(u8, 1), (try runForTest(arena.allocator(), "Fail 0\n", &.{})).exit_status);
+}
+
+test "a missing command is reported with the bs prefix" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try runForTest(arena.allocator(), "cd /definitely/not/a/directory\n", &.{});
+    try std.testing.expectEqual(@as(u8, 1), result.exit_status);
+    try std.testing.expect(std.mem.find(u8, result.stderr, "bs: cd: /definitely/not/a/directory: no such file or directory\n") != null);
 }
 
 test "exit and runtime errors set the status" {

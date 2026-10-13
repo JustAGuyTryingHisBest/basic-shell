@@ -36,21 +36,36 @@ pub fn init(ctx: *ShellCtx, io: std.Io, env_vars: *std.process.Environ.Map) void
     ctx.last_exit_status = 0;
 }
 
+/// The buffered standard input.
 pub fn stdin(ctx: *ShellCtx) *std.Io.Reader {
     return &ctx.stdin_file_reader.interface;
 }
 
+/// The buffered standard output.
 pub fn stdout(ctx: *ShellCtx) *std.Io.Writer {
     return &ctx.stdout_file_writer.interface;
 }
 
+/// The buffered standard error.
 pub fn stderr(ctx: *ShellCtx) *std.Io.Writer {
     return &ctx.stderr_file_writer.interface;
 }
 
-/// Writes `shell: <message>` plus a newline to stderr and flushes it.
+/// Readable text for the common file-system errors; other errors keep their
+/// Zig name.
+pub fn describeFileError(err: anyerror) []const u8 {
+    return switch (err) {
+        error.FileNotFound => "no such file or directory",
+        error.AccessDenied => "permission denied",
+        error.NotDir => "not a directory",
+        error.IsDir => "is a directory",
+        else => @errorName(err),
+    };
+}
+
+/// Writes `bs: <message>` plus a newline to stderr and flushes it.
 pub fn reportError(ctx: *ShellCtx, comptime format: []const u8, arguments: anytype) std.Io.Writer.Error!void {
     const stderr_writer = ctx.stderr();
-    try stderr_writer.print("shell: " ++ format ++ "\n", arguments);
+    try stderr_writer.print("bs: " ++ format ++ "\n", arguments);
     try stderr_writer.flush();
 }

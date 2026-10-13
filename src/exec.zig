@@ -100,7 +100,7 @@ fn spawnProgram(
         .environ_map = shell_ctx.env_vars,
         .stdout = stdout_mode,
     }) catch |err| {
-        try shell_ctx.reportError("{s}: {s}", .{ command_name, @errorName(err) });
+        try shell_ctx.reportError("{s}: {s}", .{ command_name, ShellCtx.describeFileError(err) });
         return .{ .not_started = switch (err) {
             error.FileNotFound => 127,
             else => 126,

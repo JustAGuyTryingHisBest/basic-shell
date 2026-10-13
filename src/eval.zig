@@ -217,7 +217,9 @@ pub const Interpreter = struct {
     fn checkStatementStatus(interpreter: *Interpreter, statement_value: Value, source_offset: u32) EvalError!void {
         const code = statement_value.failCode() orelse return;
         const line_text = std.mem.trim(u8, interpreter.source.locate(source_offset).line_text, " \t");
-        return interpreter.failCommand(@intCast(@mod(code, 256)), source_offset, &.{line_text});
+        // A failure must never look like success, even for `Fail 0` or `Fail 256`.
+        const status: u8 = @intCast(@mod(code, 256));
+        return interpreter.failCommand(if (status == 0) 1 else status, source_offset, &.{line_text});
     }
 
     fn evalStatements(interpreter: *Interpreter, statements: []const ast.Statement, environment: ?*const Environment, is_tail: bool) EvalError!TailResult {
@@ -526,7 +528,7 @@ pub const Interpreter = struct {
         switch (builtin) {
             .cd => std.process.setCurrentPath(interpreter.shell_ctx.io, words[0]) catch |err| {
                 try interpreter.stdout.flush();
-                try interpreter.stderr.print("shell: cd: {s}: {s}\n", .{ words[0], @errorName(err) });
+                try interpreter.stderr.print("bs: cd: {s}: {s}\n", .{ words[0], ShellCtx.describeFileError(err) });
                 try interpreter.stderr.flush();
                 return interpreter.failCommand(1, source_offset, &.{ "cd", words[0] });
             },

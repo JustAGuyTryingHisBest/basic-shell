@@ -1,0 +1,2 @@
+# Writing to a closed pipe kills bs quietly (default SIGPIPE), like sh.
+sh -c '"$BS_BINARY" -c "for (lines (seq 1 100000)) \\x -> echo \$x" | head -1'

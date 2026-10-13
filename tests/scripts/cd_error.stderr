@@ -1,0 +1,2 @@
+bs: cd: /definitely/not/a/directory: no such file or directory
+cd_error.bs:1: 'cd /definitely/not/a/directory' failed with status 1

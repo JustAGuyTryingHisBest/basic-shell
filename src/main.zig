@@ -1,3 +1,4 @@
+//! The `bs` executable: forwards to the shell library.
 const std = @import("std");
 const shell = @import("shell");
 

@@ -26,6 +26,20 @@ pub fn installHandlers(stderr: *std.Io.Writer) !void {
     std.posix.sigaction(std.posix.SIG.TERM, &sig_act, null);
 }
 
+/// Restores the default SIGPIPE disposition (spec §8.6), so that writing to a
+/// closed pipe kills the process quietly as it does in `sh`. The standard
+/// library's I/O runtime installs a no-op handler that turns it into EPIPE.
+pub fn restoreDefaultPipeSignal() void {
+    if (comptime builtin.os.tag == .windows) return;
+    const default_action: std.posix.Sigaction = .{
+        .handler = .{ .handler = std.posix.SIG.DFL },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.PIPE, &default_action, null);
+}
+
+/// Reports whether a termination signal has been received.
 pub fn shouldExit() bool {
     return should_exit.load(.monotonic);
 }

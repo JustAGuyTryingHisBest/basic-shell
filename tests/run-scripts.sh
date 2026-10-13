@@ -11,6 +11,8 @@ case $bs_binary in
   *) bs_binary=$PWD/$bs_binary ;;
 esac
 cd "$(dirname "$0")/scripts" || exit 1
+# Lets scripts start bs again (see closed_pipe.bs).
+export BS_BINARY=$bs_binary
 
 scratch_directory=$(mktemp -d)
 trap 'rm -rf "$scratch_directory"' EXIT
