@@ -296,13 +296,20 @@ const Parser = struct {
         return tag == .word or tag == .left_paren or tag == .left_bracket;
     }
 
+    /// Keywords and `_` are ordinary words when they are arguments
+    /// (`git checkout main`); they only mean something at the start of a
+    /// statement.
+    fn startsArgument(tag: Tag) bool {
+        return startsAtom(tag) or tag == .keyword_data or tag == .keyword_main or tag == .keyword_match or tag == .wildcard;
+    }
+
     /// Parses the arguments after `head`, if any. A lambda may be the last
     /// argument without parentheses.
     fn parseApplication(parser: *Parser, head: *ast.Expression) ParseError!*ast.Expression {
         var arguments: std.ArrayList(*ast.Expression) = .empty;
         while (true) {
             const tag = parser.peekTag();
-            if (startsAtom(tag)) {
+            if (startsArgument(tag)) {
                 try arguments.append(parser.allocator, try parser.parseAtom());
             } else if (tag == .lambda) {
                 try arguments.append(parser.allocator, try parser.parseLambda());
@@ -316,7 +323,7 @@ const Parser = struct {
         } });
     }
 
-    /// Callers check `startsAtom` first.
+    /// Callers check `startsArgument` (or `startsAtom`) first.
     fn parseAtom(parser: *Parser) ParseError!*ast.Expression {
         const token = parser.advance();
         switch (token.tag) {
@@ -325,6 +332,21 @@ const Parser = struct {
                 .is_plain = token.is_plain,
                 .source_length = token.source_length,
             } }),
+            .keyword_data, .keyword_main, .keyword_match, .wildcard => {
+                const word_text: []const u8 = switch (token.tag) {
+                    .keyword_data => "data",
+                    .keyword_main => "main",
+                    .keyword_match => "match",
+                    else => "_",
+                };
+                const parts = try parser.allocator.alloc(lexer.WordPart, 1);
+                parts[0] = .{ .text = word_text };
+                return parser.newExpression(token.source_offset, .{ .word = .{
+                    .parts = parts,
+                    .is_plain = true,
+                    .source_length = token.source_length,
+                } });
+            },
             .left_paren => {
                 const inner = try parser.parseExpression();
                 _ = try parser.expect(.right_paren, "')'");
@@ -511,6 +533,11 @@ test "commands and definitions" {
     try expectParse("up name = ip link set dev $name up", "(def up (name) (call ip link set dev \"${name}\" up))\n");
     try expectParse("arch = uname -m", "(def arch () (call uname -m))\n");
     try expectParse("main = {\n  echo hi\n  skip\n}", "(def main () (block (call echo hi) skip))\n");
+}
+
+test "keywords and the wildcard are ordinary words as arguments" {
+    try expectParse("git checkout main", "(call git checkout main)\n");
+    try expectParse("echo data match _", "(call echo data match _)\n");
 }
 
 test "match" {

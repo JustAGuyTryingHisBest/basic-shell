@@ -1,0 +1,3 @@
+# Keywords and _ are ordinary words as command arguments.
+echo data main match _
+printf '%s\n' checkout main

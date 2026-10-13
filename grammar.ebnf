@@ -102,9 +102,14 @@ function_call = atom , ( atom , { atom } , [ lambda ] | lambda ) ;
 
 atom
   = WORD
+  | argument_keyword   (* only in argument position: git checkout main *)
   | list
   | "(" , expression , ")"
   ;
+
+(* Keywords and "_" start nothing special after the head of a call; as
+   arguments they are plain literal words. *)
+argument_keyword = KEYWORD_DATA | KEYWORD_MAIN | KEYWORD_MATCH | WILDCARD ;
 
 list = "[" , [ expression , { "," , expression } ] , "]" ;
 
@@ -227,6 +232,9 @@ identifier
 (* A leading "-" is part of the number, not an operator. *)
 INTEGER = ( [ "-" ] , DIGIT , { DIGIT } ) ;
 
+(* Keywords and WILDCARD are excluded here only where a statement may start
+   with them; as call arguments they are accepted as words (argument_keyword)
+   and are literal in command context. *)
 literal_word
   = WORD
   - ( variable_containing_word | keyword | structural_token | WILDCARD
