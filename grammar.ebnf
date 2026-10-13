@@ -1,0 +1,251 @@
+(* bs: a small Haskell-like scripting shell.
+
+   - Keywords: data, match, main. Nothing else is reserved.
+   - Curly braces delimit sequences: blocks, match arms and record fields.
+   - No built-in operators. Arithmetic, comparison, boolean logic and list
+     construction are ordinary functions and constructors:
+       add x y          eq a b          data Bool = False | True
+     The only punctuation is structural:  =  ::  ->  \  |  { } ( ) [ ] , ;
+   - Source is split into shell-like words (see "Lexical structure"), so
+     `-l`, `/tmp` and `uci.lan.ip=$ip` are single words.
+
+   Notation: ISO 14977 EBNF. The rules under "Lexical structure" describe
+   tokens; between any two tokens of the other rules any amount of
+   `whitespace` may appear. NEWLINE is itself a token (it separates
+   statements), except where the lexer drops it; see `separator`.
+   docs/superpowers/specs/2026-10-10-bs-language-design.md gives the
+   semantics. *)
+
+root = separators_opt , [ statement_global , { separators , statement_global } , separators_opt ] ;
+
+
+(* ---------------------------------------------------------------- *)
+(* Statements                                                        *)
+(* ---------------------------------------------------------------- *)
+
+statement_global
+  = data_declaration
+  | type_signature
+  | main_definition
+  | statement_local
+  ;
+
+(* `f x = ...` and the expression `f x` share a prefix; the parser picks
+   `definition` when an "=" token follows at bracket depth 0 before the next
+   separator. *)
+statement_local
+  = definition
+  | expression
+  ;
+
+(* main = { ... } *)
+main_definition = KEYWORD_MAIN , "=" , expression ;
+
+(* A definition with no parameters binds a value. *)
+definition = identifier , { parameter } , "=" , expression ;
+
+parameter = identifier | WILDCARD ;
+
+
+(* ---------------------------------------------------------------- *)
+(* Data declarations and types                                       *)
+(* ---------------------------------------------------------------- *)
+
+(* data Maybe a = Nothing | Just a
+   data Service = Service { name :: String ; port :: Int } *)
+data_declaration
+  = KEYWORD_DATA , constructor_identifier , { identifier } ,
+    "=" , constructor , { "|" , constructor }
+  ;
+
+constructor = constructor_identifier , ( record_fields | { type_atom } ) ;
+
+record_fields = "{" , separators_opt , [ field , { separators , field } , separators_opt ] , "}" ;
+
+field = identifier , "::" , type ;
+
+type_signature = ( identifier | KEYWORD_MAIN ) , "::" , type ;
+
+(* "->" is right-associative: a -> b -> c  is  a -> (b -> c). *)
+type = type_application , [ "->" , type ] ;
+
+type_application = type_atom , { type_atom } ;
+
+type_atom
+  = constructor_identifier          (* Int, Maybe, IO *)
+  | identifier                      (* type variable *)
+  | "(" , type , ")"
+  | "[" , type , "]"                (* list type *)
+  ;
+
+
+(* ---------------------------------------------------------------- *)
+(* Expressions                                                       *)
+(* ---------------------------------------------------------------- *)
+
+(* Blocks, matches and lambdas are not atoms, so they must be
+   parenthesised to be passed as arguments; the one exception is a lambda
+   as the last argument of a call. This keeps `match f x { ... }`
+   unambiguous: the braces always open the arms. *)
+expression
+  = block
+  | match_expression
+  | lambda
+  | function_call
+  | atom
+  ;
+
+(* Application by juxtaposition, left-associative: f x y  is  (f x) y.
+   Whether a WORD argument is a literal or a variable depends on the head
+   (command or expression context); that is decided after parsing. *)
+function_call = atom , ( atom , { atom } , [ lambda ] | lambda ) ;
+
+atom
+  = WORD
+  | list
+  | "(" , expression , ")"
+  ;
+
+list = "[" , [ expression , { "," , expression } ] , "]" ;
+
+(* The value of a block is the value of its last statement. *)
+block = "{" , separators_opt , [ statement_local , { separators , statement_local } , separators_opt ] , "}" ;
+
+(* The body extends as far to the right as possible. *)
+lambda = LAMBDA , parameter , { parameter } , "->" , expression ;
+
+(* A bare call as scrutinee yields its Status; a parenthesised one
+   captures output. *)
+match_expression = KEYWORD_MATCH , ( function_call | atom ) , match_arms ;
+
+match_arms = "{" , separators_opt , [ match_arm , { separators , match_arm } , separators_opt ] , "}" ;
+
+match_arm = pattern , "->" , expression ;
+
+
+(* ---------------------------------------------------------------- *)
+(* Patterns                                                          *)
+(* ---------------------------------------------------------------- *)
+
+pattern
+  = constructor_identifier , pattern_atom , { pattern_atom }   (* Just x, Fail code *)
+  | pattern_atom
+  ;
+
+pattern_atom
+  = WILDCARD
+  | identifier                      (* binds a variable *)
+  | literal
+  | constructor_identifier          (* nullary constructor: Ok, Nothing *)
+  | "(" , pattern , ")"
+  | "[" , [ pattern , { "," , pattern } ] , "]"   (* fixed-length list *)
+  ;
+
+(* A pattern literal is an integer or any WORD without variables that is
+   not an identifier, constructor identifier, keyword or structural token,
+   e.g. "lo" or '-'. *)
+literal = INTEGER | literal_word ;
+
+
+(* ---------------------------------------------------------------- *)
+(* Separators                                                        *)
+(* ---------------------------------------------------------------- *)
+
+(* The lexer does not emit NEWLINE
+     - inside ( ) or [ ];
+     - after  =  ->  ::  |  or LAMBDA;
+     - before | ;
+   so long calls, type signatures and data alternatives can span lines. *)
+separator = ";" | NEWLINE ;
+separators = separator , { separator } ;
+separators_opt = { separator } ;
+
+
+(* ---------------------------------------------------------------- *)
+(* Lexical structure                                                 *)
+(* ---------------------------------------------------------------- *)
+
+(* A word is a run of parts with no blank between them. "," is
+   structural only when the innermost open bracket is "["; elsewhere it is
+   an ordinary bare character, so `ps -o pid,comm` is two words. *)
+WORD = word_part , { word_part } ;
+word_part = bare_text | single_quoted | double_quoted | variable ;
+
+bare_text = bare_character , { bare_character } ;
+bare_character
+  = ANY_CHAR - ( BLANK | NEWLINE | structural_character | "'" | '"' | "$" | "\" )
+  | "\" , ( ANY_CHAR - NEWLINE )     (* escape: the next character, literally *)
+  ;
+structural_character = "{" | "}" | "(" | ")" | "[" | "]" | ";" ;
+
+single_quoted = "'" , { ANY_CHAR - "'" } , "'" ;
+
+(* Inside double quotes "\" escapes only '"', "\" and "$"; before any other
+   character it is kept, so "a\n" is the three characters a \ n. *)
+double_quoted = '"' , { double_quoted_character | variable } , '"' ;
+double_quoted_character
+  = ANY_CHAR - ( '"' | "\" | "$" )
+  | "\" , ( '"' | "\" | "$" )
+  | "\"                              (* not followed by '"', "\" or "$" *)
+  ;
+
+(* $name takes the longest run of name characters; ${name} delimits it.
+   Only a name is allowed inside the braces. *)
+variable = "$" , ( name_text | "{" , name_text , "}" ) ;
+name_text = ( LETTER | "_" ) , { LETTER | DIGIT | "_" } ;
+
+(* A plain word is a WORD that is a single bare_text part with no escapes.
+   Only plain words are keywords, structural tokens, wildcards, integers or
+   identifiers; every other plain word is a literal_word. *)
+plain_word = bare_text ;
+
+(* Keywords *)
+KEYWORD_DATA = "data" ;
+KEYWORD_MAIN = "main" ;
+KEYWORD_MATCH = "match" ;
+keyword = KEYWORD_DATA | KEYWORD_MAIN | KEYWORD_MATCH ;
+
+(* Structural tokens: only as a whole plain word ("=" but not "a=b"). *)
+structural_token = "=" | "->" | "::" | "|" ;
+WILDCARD = "_" ;
+
+(* An unquoted "\" at the start of a word followed by a letter or "_"
+   begins a lambda: \x -> ... *)
+LAMBDA = "\" ;
+
+(* Identifiers. Lowercase (or "_") start: variables, functions, fields,
+   type variables. Uppercase start: types and constructors. Names starting
+   with "__" are reserved for the implementation. *)
+any_identifier = ( LETTER | "_" ) , { LETTER | "_" | DIGIT } ;
+internal_identifier = "__" , { LETTER | "_" | DIGIT } ;
+constructor_identifier = ( UPPER , { LETTER | "_" | DIGIT } ) ;
+identifier
+  = any_identifier
+  - ( constructor_identifier | keyword | internal_identifier | WILDCARD )
+  ;
+
+(* A leading "-" is part of the number, not an operator. *)
+INTEGER = ( [ "-" ] , DIGIT , { DIGIT } ) ;
+
+literal_word
+  = WORD
+  - ( variable_containing_word | keyword | structural_token | WILDCARD
+    | INTEGER | identifier | constructor_identifier )
+  ;
+variable_containing_word = ? any WORD with a variable part ? ;
+
+(* An unquoted "#" at the start of a word begins a comment to the end of
+   the line ("a#b" is one word). The newline is not part of the comment,
+   so it still separates statements. A "#!" first line is a comment. *)
+comment = "#" , { ANY_CHAR - NEWLINE } ;
+
+whitespace = BLANK | comment ;
+
+(* Character classes *)
+UPPER = ? "A" to "Z" ? ;
+LOWER = ? "a" to "z" ? ;
+LETTER = UPPER | LOWER ;
+DIGIT = ? "0" to "9" ? ;
+BLANK = " " | ? horizontal tab ? ;
+NEWLINE = ? line feed, U+000A ? ;
+ANY_CHAR = ? any Unicode scalar value ? ;
