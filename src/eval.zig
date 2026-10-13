@@ -878,3 +878,11 @@ test "a failing capture propagates with the command line" {
     try std.testing.expectEqualStrings("sh -c printf partial; exit 2", outcome.failure_description);
     try std.testing.expectEqualStrings("", outcome.stdout);
 }
+
+test "a function body that is a quoted word returns the string" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const outcome = try runForTest(arena.allocator(), "f a = \"hello\"\necho (f 1)\n", .{});
+    try std.testing.expectEqual(@as(?EvalError, null), outcome.script_error);
+    try std.testing.expectEqualStrings("hello\n", outcome.stdout);
+}

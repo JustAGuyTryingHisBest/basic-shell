@@ -157,12 +157,7 @@ const Resolver = struct {
     }
 
     fn resolveWord(resolver: *Resolver, expression: *ast.Expression, word: ast.Word, scope: ?*const Scope, slot: Slot) Allocator.Error!void {
-        if (!word.is_plain) {
-            // A lone quoted word as a statement runs as a command, like
-            // `resolveHead` treats a quoted head with arguments.
-            if (slot == .statement and !containsVariable(word)) return resolver.resolveLoneWordAsCall(expression, scope, slot);
-            return resolver.resolveQuotedWord(expression, word, scope);
-        }
+        if (!word.is_plain) return resolver.resolveQuotedWord(expression, word, scope);
         const text = word.parts[0].text;
         if (slot == .command_argument) {
             expression.data = .{ .literal_string = text };
@@ -211,14 +206,6 @@ const Resolver = struct {
         } else {
             try resolver.report(expression.source_offset, "undefined variable '{s}'", .{name});
         }
-    }
-
-    fn containsVariable(word: ast.Word) bool {
-        for (word.parts) |part| switch (part) {
-            .variable => return true,
-            .text => {},
-        };
-        return false;
     }
 
     fn resolveQuotedWord(resolver: *Resolver, expression: *ast.Expression, word: ast.Word, scope: ?*const Scope) Allocator.Error!void {
@@ -333,9 +320,7 @@ const Resolver = struct {
     }
 
     fn resolveMatch(resolver: *Resolver, match: ast.Match, scope: ?*const Scope, slot: Slot) Allocator.Error!void {
-        // A quoted word scrutinee is a string to match on, not a command.
-        const scrutinee_is_quoted_word = match.scrutinee.data == .word and !match.scrutinee.data.word.is_plain;
-        const scrutinee_slot: Slot = if (match.scrutinee_is_parenthesized or scrutinee_is_quoted_word) .value else .statement;
+        const scrutinee_slot: Slot = if (match.scrutinee_is_parenthesized) .value else .statement;
         try resolver.resolveExpression(match.scrutinee, scope, scrutinee_slot);
         const arm_slot: Slot = if (slot == .statement) .statement else .value;
         for (match.arms) |arm| {
@@ -441,11 +426,6 @@ test "value positions capture; arguments are expressions" {
 test "keywords and the wildcard are literals in command arguments" {
     try expectResolved("git checkout main", "(external:status git 'checkout' 'main')\n");
     try expectResolved("echo data match _", "(builtin echo 'data' 'match' '_')\n");
-}
-
-test "a lone quoted word is a command only as a statement" {
-    try expectResolved("'/opt/my tool'", "(external:status /opt/my tool)\n");
-    try expectResolved("x = \"eth0\"", "(def x () 'eth0')\n");
 }
 
 test "lone words" {
