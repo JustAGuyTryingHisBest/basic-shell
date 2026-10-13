@@ -2,6 +2,8 @@
 const std = @import("std");
 
 const Source = @import("Source.zig");
+
+/// One error, located by a byte offset into its source.
 pub const Diagnostic = struct {
     source_offset: u32,
     /// Bytes underlined in the excerpt; at least 1.
@@ -20,6 +22,7 @@ pub const Diagnostics = struct {
         return .{ .allocator = allocator };
     }
 
+    /// Formats a message with `arguments` and records it at `source_offset`.
     pub fn add(
         diagnostics: *Diagnostics,
         source_offset: u32,
@@ -35,6 +38,7 @@ pub const Diagnostics = struct {
         });
     }
 
+    /// Reports whether any error has been recorded.
     pub fn hasErrors(diagnostics: Diagnostics) bool {
         return diagnostics.items.items.len != 0;
     }
@@ -63,8 +67,6 @@ pub fn render(writer: *std.Io.Writer, source: Source, diagnostic: Diagnostic) st
     try writer.splatByteAll('~', underline_length - 1);
     try writer.writeByte('\n');
 }
-
-
 
 test "render prints location, message, line and underline" {
     const source: Source = .{ .display_name = "up.bs", .text = "echo hi\nip link set dev $nmae up\n" };

@@ -3,10 +3,13 @@
 const std = @import("std");
 
 const Source = @This();
+
 /// Name shown in messages: the script path, or `-c`.
 display_name: []const u8,
+/// The script's full contents.
 text: []const u8,
 
+/// A position in a script, as printed in error messages.
 pub const Location = struct {
     /// 1-based.
     line_number: u32,
@@ -40,8 +43,6 @@ pub fn locate(source: Source, offset: u32) Location {
         .line_text = source.text[line_start..line_end],
     };
 }
-
-
 
 test "locate finds line, column and line text" {
     const source: Source = .{ .display_name = "t.bs", .text = "echo hi\nip link\n" };
