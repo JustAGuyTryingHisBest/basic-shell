@@ -57,7 +57,7 @@ pub fn captureExternalCommand(
     };
     var read_buffer: [4096]u8 = undefined;
     var stdout_reader = child.stdout.?.readerStreaming(shell_ctx.io, &read_buffer);
-    const output = stdout_reader.interface.allocRemaining(allocator, .limited(output_limit + 1)) catch |err| {
+    const output = stdout_reader.interface.allocRemaining(allocator, .limited(output_limit)) catch |err| {
         child.kill(shell_ctx.io);
         return switch (err) {
             error.StreamTooLong => error.CaptureTooLarge,
@@ -161,4 +161,19 @@ test "run returns exit statuses, 127 when not found" {
     try std.testing.expectEqual(@as(u8, 5), try runExternalCommand(&shell_ctx, &exit_argv));
     var missing_argv = [_][]const u8{"definitely-not-a-command-xyz"};
     try std.testing.expectEqual(@as(u8, 127), try runExternalCommand(&shell_ctx, &missing_argv));
+}
+
+test "capture accepts exactly the limit and rejects one byte more" {
+    var environment: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environment.deinit();
+    var shell_ctx: ShellCtx = undefined;
+    try initTestShell(&shell_ctx, &environment);
+
+    var exact_argv = [_][]const u8{ "printf", "12345678" };
+    const exact = try captureExternalCommand(&shell_ctx, std.testing.allocator, &exact_argv, 8);
+    defer std.testing.allocator.free(exact.output);
+    try std.testing.expectEqualStrings("12345678", exact.output);
+
+    var over_argv = [_][]const u8{ "printf", "123456789" };
+    try std.testing.expectError(error.CaptureTooLarge, captureExternalCommand(&shell_ctx, std.testing.allocator, &over_argv, 8));
 }
