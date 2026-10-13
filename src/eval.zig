@@ -521,10 +521,25 @@ pub const Interpreter = struct {
         return Value.ok;
     }
 
-    /// `cd` and `export`; implemented in Task 8.
+    /// `cd dir` and `export NAME value`.
     fn runEnvironmentBuiltin(interpreter: *Interpreter, builtin: ast.Builtin, words: []const []const u8, source_offset: u32) EvalError!Value {
-        _ = words;
-        return interpreter.raise(source_offset, "'{s}' is not supported yet", .{@tagName(builtin)});
+        switch (builtin) {
+            .cd => std.process.setCurrentPath(interpreter.shell_ctx.io, words[0]) catch |err| {
+                try interpreter.stdout.flush();
+                try interpreter.stderr.print("shell: cd: {s}: {s}\n", .{ words[0], @errorName(err) });
+                try interpreter.stderr.flush();
+                return interpreter.failCommand(1, source_offset, &.{ "cd", words[0] });
+            },
+            .@"export" => {
+                const name = words[0];
+                if (name.len == 0 or std.mem.findScalar(u8, name, '=') != null or std.mem.findScalar(u8, name, 0) != null) {
+                    return interpreter.raise(source_offset, "'{s}' is not a valid environment variable name", .{name});
+                }
+                try interpreter.shell_ctx.env_vars.put(name, words[1]);
+            },
+            else => unreachable,
+        }
+        return Value.ok;
     }
 
     fn evalFor(interpreter: *Interpreter, call: *const ast.Call, environment: ?*const Environment, source_offset: u32) EvalError!Value {
@@ -547,10 +562,36 @@ pub const Interpreter = struct {
         return Value.ok;
     }
 
-    /// Running programs; implemented in Task 8.
+    /// Runs a program from `$PATH` (spec §5.5): in `.status` context it
+    /// inherits stdout and produces `Ok` or a failure; in `.capture` context
+    /// its stdout, minus one trailing newline, is the value.
     fn evalExternal(interpreter: *Interpreter, expression: *const ast.Expression, call: *const ast.Call, environment: ?*const Environment) EvalError!Value {
-        _ = environment;
-        return interpreter.raise(expression.source_offset, "running '{s}' is not supported yet", .{call.name});
+        const words = try interpreter.evalWords(call.arguments, environment);
+        const argv = try interpreter.allocator().alloc([]const u8, words.len + 1);
+        argv[0] = call.name;
+        @memcpy(argv[1..], words);
+        // Keep our own output ahead of the child's.
+        try interpreter.stdout.flush();
+        switch (call.context) {
+            .status => {
+                const exit_status = try exec.runExternalCommand(interpreter.shell_ctx, argv);
+                if (exit_status == 0) return Value.ok;
+                argv[0] = call.name; // `runExternalCommand` replaced it with the full path
+                return interpreter.failCommand(exit_status, expression.source_offset, argv);
+            },
+            .capture => {
+                const capture = exec.captureExternalCommand(interpreter.shell_ctx, interpreter.allocator(), argv, capture_limit_bytes) catch |err| switch (err) {
+                    error.CaptureTooLarge => return interpreter.raise(expression.source_offset, "output of '{s}' is larger than {d} bytes", .{ call.name, capture_limit_bytes }),
+                    else => |other| return other,
+                };
+                if (capture.exit_status != 0) {
+                    argv[0] = call.name;
+                    return interpreter.failCommand(capture.exit_status, expression.source_offset, argv);
+                }
+                const output = capture.output;
+                return .{ .string = if (std.mem.endsWith(u8, output, "\n")) output[0 .. output.len - 1] else output };
+            },
+        }
     }
 };
 
@@ -804,4 +845,34 @@ test "tail-recursive loops run in constant memory" {
     const small_peak = try peakBytesForCount(arena.allocator(), 1_000);
     const large_peak = try peakBytesForCount(arena.allocator(), 100_000);
     try std.testing.expect(large_peak <= small_peak + 16 * 1024);
+}
+
+test "external commands run and their failures can be caught" {
+    try expectOutput("sh -c 'exit 0'\nmatch sh -c 'exit 5' {\n  Ok -> echo ok\n  Fail code -> echo \"status $code\"\n}\n", "status 5\n");
+}
+
+test "capture removes exactly one trailing newline" {
+    try expectOutput("x = printf \"a\\n\\n\"\necho \"[$x]\"\ny = printf abc\necho $y\n", "[a\n]\nabc\n");
+}
+
+test "lists expand to one argument per element and are never split" {
+    try expectOutput("items = [\"a b\", \"c\"]\nx = printf \"<%s>\" $items \"d e\"\necho $x\n", "<a b><c><d e>\n");
+}
+
+test "export reaches child processes" {
+    try expectOutput("export FOO bar\nx = sh -c 'printf %s \"$FOO\"'\necho $x\n", "bar\n");
+}
+
+test "a command that is not found fails with 127" {
+    try expectOutput("match definitely-not-a-command-xyz {\n  Fail code -> echo \"status $code\"\n  _ -> skip\n}\n", "status 127\n");
+}
+
+test "a failing capture propagates with the command line" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const outcome = try runForTest(arena.allocator(), "x = sh -c 'printf partial; exit 2'\necho unreachable\n", .{});
+    try std.testing.expectEqual(@as(?EvalError, error.CommandFailed), outcome.script_error);
+    try std.testing.expectEqual(@as(u8, 2), outcome.exit_status);
+    try std.testing.expectEqualStrings("sh -c printf partial; exit 2", outcome.failure_description);
+    try std.testing.expectEqualStrings("", outcome.stdout);
 }
