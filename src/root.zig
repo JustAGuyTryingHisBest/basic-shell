@@ -9,5 +9,6 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("Source.zig");
     _ = @import("diagnostics.zig");
+    _ = @import("lexer.zig");
     _ = @import("prompt_words.zig");
 }
