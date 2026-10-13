@@ -8,6 +8,7 @@ pub const main = @import("repl.zig").run;
 test {
     std.testing.refAllDecls(@This());
     _ = @import("ast.zig");
+    _ = @import("builtins.zig");
     _ = @import("Source.zig");
     _ = @import("diagnostics.zig");
     _ = @import("exec.zig");
@@ -15,4 +16,5 @@ test {
     _ = @import("parser.zig");
     _ = @import("prompt_words.zig");
     _ = @import("resolve.zig");
+    _ = @import("value.zig");
 }
