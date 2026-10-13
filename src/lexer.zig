@@ -259,7 +259,7 @@ const Tokenizer = struct {
             .parts = try builder.finish(),
             .is_plain = builder.is_plain,
         };
-        if (token.is_plain) {
+        if (token.is_plain and token.parts.len != 0) {
             token.tag = plainWordTag(token.plainText());
             if (token.tag != .word) token.parts = &.{};
         }
@@ -346,6 +346,7 @@ const Tokenizer = struct {
                     return;
                 }
             }
+            builder.is_plain = false;
             try tokenizer.diagnostics.add(@intCast(dollar_index), 2, "expected a variable name and '}}' after '${{'", .{});
             tokenizer.index = name_start;
             return;
@@ -561,4 +562,6 @@ test "lexical errors" {
     try expectLexError("echo \"abc", "unterminated double quote");
     try expectLexError("echo abc\\", "a backslash cannot end a line");
     try expectLexError("echo ${1x}", "expected a variable name and '}' after '${'");
+    try expectLexError("echo ${}", "expected a variable name and '}' after '${'");
+    try expectLexError("echo ${", "expected a variable name and '}' after '${'");
 }
