@@ -13,4 +13,5 @@ test {
     _ = @import("lexer.zig");
     _ = @import("parser.zig");
     _ = @import("prompt_words.zig");
+    _ = @import("resolve.zig");
 }
