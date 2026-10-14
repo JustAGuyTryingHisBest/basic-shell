@@ -1,5 +1,6 @@
-//! The `bs` command line (spec §7.1): runs a script file or `-c` code, or
-//! starts the prompt when given no arguments.
+//! The `bs` command line (spec §7.1): runs a script file or `-c` code, prints
+//! the version for `-v`/`--version`, or starts the prompt when given no
+//! arguments.
 const std = @import("std");
 
 const diagnostics = @import("diagnostics.zig");
@@ -11,6 +12,7 @@ const resolve = @import("resolve.zig");
 const ShellCtx = @import("ShellCtx.zig");
 const signals = @import("signals.zig");
 const Source = @import("Source.zig");
+const version = @import("version");
 
 const Allocator = std.mem.Allocator;
 
@@ -38,6 +40,11 @@ pub fn main(init: std.process.Init) !u8 {
         }
         source = .{ .display_name = "-c", .text = command_line[2] };
         first_script_argument = 3;
+    } else if (std.mem.eql(u8, command_line[1], "-v") or std.mem.eql(u8, command_line[1], "--version")) {
+        const stdout = shell_ctx.stdout();
+        try writeVersion(stdout);
+        try stdout.flush();
+        return 0;
     } else {
         source = Source.load(init.io, arena.allocator(), command_line[1]) catch |err| {
             try shell_ctx.reportError("{s}: {s}", .{ command_line[1], ShellCtx.describeFileError(err) });
@@ -107,6 +114,12 @@ pub fn runSource(
     return 0;
 }
 
+/// Writes `bs <version> (<git revision>)` and a newline; both values are
+/// embedded at build time (see createVersionModule in build.zig).
+fn writeVersion(writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    try writer.print("bs {s} ({s})\n", .{ version.version, version.git_revision });
+}
+
 fn isEarlier(_: void, left: diagnostics.Diagnostic, right: diagnostics.Diagnostic) bool {
     return left.source_offset < right.source_offset;
 }
@@ -133,6 +146,16 @@ fn runForTest(arena: Allocator, source_text: []const u8, script_arguments: []con
         script_arguments,
     );
     return .{ .exit_status = exit_status, .stdout = stdout.written(), .stderr = stderr.written() };
+}
+
+test "the version line names the package version and git revision" {
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try writeVersion(&output.writer);
+    const expected_line = "bs " ++ version.version ++ " (" ++ version.git_revision ++ ")\n";
+    try std.testing.expectEqualStrings(expected_line, output.written());
+    try std.testing.expect(version.version.len > 0);
+    try std.testing.expect(version.git_revision.len > 0);
 }
 
 test "empty scripts and shebang-only scripts succeed" {

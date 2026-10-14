@@ -46,4 +46,18 @@ for script in *.bs; do
   fi
 done
 
+# The version line embeds the git revision, so it is matched by shape, not
+# compared with a file.
+for version_flag in -v --version; do
+  version_line=$("$bs_binary" "$version_flag")
+  version_status=$?
+  case $version_status:$version_line in
+    "0:bs "*" ("*")") echo "ok   bs $version_flag" ;;
+    *)
+      echo "FAIL bs $version_flag: status $version_status, output '$version_line'"
+      failure_count=$((failure_count + 1))
+      ;;
+  esac
+done
+
 [ $failure_count -eq 0 ]

@@ -1,9 +1,11 @@
 const std = @import("std");
+const package_manifest = @import("build.zig.zon");
 
 const ShellBuildCtx = struct {
     b: *std.Build,
     exe: *std.Build.Step.Compile,
     mod: *std.Build.Module,
+    version_module: *std.Build.Module,
 };
 
 fn setup_tests(ctx: *ShellBuildCtx) void {
@@ -31,9 +33,11 @@ fn setup_tests(ctx: *ShellBuildCtx) void {
 fn setup_build(b: *std.Build, ctx: *ShellBuildCtx) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const version_module = createVersionModule(b);
     const mod = b.addModule("shell", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
+        .imports = &.{.{ .name = "version", .module = version_module }},
     });
     const exe = b.addExecutable(.{
         .name = "bs",
@@ -60,6 +64,7 @@ fn setup_build(b: *std.Build, ctx: *ShellBuildCtx) void {
     ctx.b = b;
     ctx.exe = exe;
     ctx.mod = mod;
+    ctx.version_module = version_module;
 }
 
 pub fn build(b: *std.Build) void {
@@ -88,6 +93,7 @@ fn setup_size_report(ctx: *ShellBuildCtx) void {
         .root_source_file = b.path("src/root.zig"),
         .target = mips_target,
         .optimize = .ReleaseSmall,
+        .imports = &.{.{ .name = "version", .module = ctx.version_module }},
     });
     const mips_executable = b.addExecutable(.{
         .name = "bs",
@@ -103,4 +109,25 @@ fn setup_size_report(ctx: *ShellBuildCtx) void {
     report_size.addArtifactArg(mips_executable);
     const size_step = b.step("size", "Report the size of a stripped ReleaseSmall mips-linux binary");
     size_step.dependOn(&report_size.step);
+}
+
+/// The `version` module: `version` from build.zig.zon and `git_revision` of
+/// the source tree. The revision comes from a step that runs on every build;
+/// a value computed directly in build() would go stale, because the
+/// configure phase is cached across commits.
+fn createVersionModule(b: *std.Build) *std.Build.Module {
+    const generate_version_source = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\revision=${2:-$(git describe --always --dirty --abbrev=12 2>/dev/null || echo unknown)}
+        \\printf 'pub const version = "%s";\npub const git_revision = "%s";\n' "$1" "$revision"
+        ,
+        "sh", package_manifest.version,
+    });
+    // Nix and tarball builds have no .git directory: -Dgit-revision=<rev>.
+    if (b.option([]const u8, "git-revision", "Git revision to embed instead of running git describe")) |git_revision|
+        generate_version_source.addArg(git_revision);
+    generate_version_source.setCwd(b.path("."));
+    generate_version_source.has_side_effects = true;
+    const version_source = generate_version_source.captureStdOut(.{ .basename = "version.zig" });
+    return b.createModule(.{ .root_source_file = version_source });
 }
