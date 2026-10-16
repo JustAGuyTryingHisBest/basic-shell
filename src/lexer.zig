@@ -48,6 +48,8 @@ pub const Token = struct {
         keyword_data,
         keyword_main,
         keyword_match,
+        /// A `#` comment, only from `tokenizeWithTrivia`.
+        comment,
         end_of_input,
     };
 
@@ -129,6 +131,7 @@ pub fn describeTag(tag: Token.Tag) []const u8 {
         .keyword_data => "'data'",
         .keyword_main => "'main'",
         .keyword_match => "'match'",
+        .comment => "a comment",
         .end_of_input => "the end of the input",
     };
 }
@@ -145,6 +148,15 @@ pub fn writeWord(writer: *std.Io.Writer, parts: []const WordPart, is_plain: bool
     try writer.writeByte('"');
 }
 
+/// Which tokens the tokenizer keeps.
+const Mode = enum {
+    /// What the parser reads: no comments, and no line breaks that cannot
+    /// end a statement.
+    program,
+    /// What the formatter reads: also comments and every line break.
+    trivia,
+};
+
 /// Splits `text` into tokens ending with `.end_of_input`. Errors are added
 /// to `diagnostics` and lexing continues, so every lexical error is reported.
 pub fn tokenize(
@@ -153,8 +165,21 @@ pub fn tokenize(
     diagnostics: *Diagnostics,
 ) std.mem.Allocator.Error![]const Token {
     var tokenizer: Tokenizer = .{ .allocator = allocator, .text = text, .diagnostics = diagnostics };
-    try tokenizer.tokenizeAll();
+    try tokenizer.tokenizeAll(.program);
     return dropOptionalNewlines(allocator, tokenizer.tokens.items);
+}
+
+/// Like `tokenize`, but also emits a `.comment` token for each comment and a
+/// `.newline` token for every line break, so the source layout can be
+/// reproduced. Only the formatter uses it; the parser never sees comments.
+pub fn tokenizeWithTrivia(
+    allocator: std.mem.Allocator,
+    text: []const u8,
+    diagnostics: *Diagnostics,
+) std.mem.Allocator.Error![]const Token {
+    var tokenizer: Tokenizer = .{ .allocator = allocator, .text = text, .diagnostics = diagnostics };
+    try tokenizer.tokenizeAll(.trivia);
+    return tokenizer.tokens.toOwnedSlice(allocator);
 }
 
 const Tokenizer = struct {
@@ -166,14 +191,14 @@ const Tokenizer = struct {
     /// Brackets opened and not yet closed, innermost last: `(`, `[` or `{`.
     open_brackets: std.ArrayList(u8) = .empty,
 
-    fn tokenizeAll(tokenizer: *Tokenizer) std.mem.Allocator.Error!void {
+    fn tokenizeAll(tokenizer: *Tokenizer, comptime mode: Mode) std.mem.Allocator.Error!void {
         while (tokenizer.index < tokenizer.text.len) {
             const character = tokenizer.text[tokenizer.index];
             switch (character) {
                 ' ', '\t' => tokenizer.index += 1,
                 '\n' => {
                     const innermost = tokenizer.innermostBracket();
-                    if (innermost == '(' or innermost == '[') {
+                    if (mode == .program and (innermost == '(' or innermost == '[')) {
                         tokenizer.index += 1;
                     } else {
                         try tokenizer.addPunctuation(.newline);
@@ -186,7 +211,10 @@ const Tokenizer = struct {
                 '}' => try tokenizer.closeBracket(.right_brace),
                 ')' => try tokenizer.closeBracket(.right_paren),
                 ']' => try tokenizer.closeBracket(.right_bracket),
-                '#' => tokenizer.skipComment(),
+                '#' => switch (mode) {
+                    .program => tokenizer.skipComment(),
+                    .trivia => try tokenizer.addComment(),
+                },
                 else => {
                     const next_index = tokenizer.index + 1;
                     if (character == ',' and tokenizer.innermostBracket() == '[') {
@@ -235,6 +263,16 @@ const Tokenizer = struct {
         while (tokenizer.index < tokenizer.text.len and tokenizer.text[tokenizer.index] != '\n') {
             tokenizer.index += 1;
         }
+    }
+
+    fn addComment(tokenizer: *Tokenizer) std.mem.Allocator.Error!void {
+        const comment_start = tokenizer.index;
+        tokenizer.skipComment();
+        try tokenizer.tokens.append(tokenizer.allocator, .{
+            .tag = .comment,
+            .source_offset = @intCast(comment_start),
+            .source_length = @intCast(tokenizer.index - comment_start),
+        });
     }
 
     fn endsWord(tokenizer: *const Tokenizer, character: u8) bool {
@@ -467,29 +505,41 @@ fn testSymbol(tag: Token.Tag) []const u8 {
         .keyword_data => "kw:data",
         .keyword_main => "kw:main",
         .keyword_match => "kw:match",
-        .word, .end_of_input => unreachable,
+        .word, .comment, .end_of_input => unreachable,
     };
 }
 
 /// Tokenizes `source_text` and compares a compact rendering with `expected`:
 /// plain words as-is, other words quoted with `${name}` for variables,
-/// punctuation as in `testSymbol`, all separated by single spaces.
+/// comments as their source text, punctuation as in `testSymbol`, all
+/// separated by single spaces.
 fn expectTokens(source_text: []const u8, expected: []const u8) !void {
+    try expectTokensIn(.program, source_text, expected);
+}
+
+fn expectTriviaTokens(source_text: []const u8, expected: []const u8) !void {
+    try expectTokensIn(.trivia, source_text, expected);
+}
+
+fn expectTokensIn(comptime mode: Mode, source_text: []const u8, expected: []const u8) !void {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
     var collected: Diagnostics = .init(allocator);
-    const tokens = try tokenize(allocator, source_text, &collected);
+    const tokens = switch (mode) {
+        .program => try tokenize(allocator, source_text, &collected),
+        .trivia => try tokenizeWithTrivia(allocator, source_text, &collected),
+    };
     for (collected.items.items) |problem| std.debug.print("unexpected diagnostic: {s}\n", .{problem.message});
     try std.testing.expect(!collected.hasErrors());
     var output: std.Io.Writer.Allocating = .init(allocator);
     for (tokens) |token| {
         if (token.tag == .end_of_input) break;
         if (output.written().len != 0) try output.writer.writeByte(' ');
-        if (token.tag == .word) {
-            try writeWord(&output.writer, token.parts, token.is_plain);
-        } else {
-            try output.writer.writeAll(testSymbol(token.tag));
+        switch (token.tag) {
+            .word => try writeWord(&output.writer, token.parts, token.is_plain),
+            .comment => try output.writer.writeAll(source_text[token.source_offset..][0..token.source_length]),
+            else => try output.writer.writeAll(testSymbol(token.tag)),
         }
     }
     try std.testing.expectEqualStrings(expected, output.written());
@@ -523,6 +573,18 @@ test "quoted parts and variables" {
     try expectTokens("$name ${name}_x pre$x.txt $ a$", "\"${name}\" \"${name}_x\" \"pre${x}.txt\" $ a$");
     try expectTokens("\\$x a\\ b", "\"$x\" \"a b\"");
     try expectTokens("${svc.port} \"on ${a.b.c}\" $svc.port", "\"${svc.port}\" \"on ${a.b.c}\" \"${svc}.port\"");
+}
+
+test "trivia mode keeps comments and every line break" {
+    try expectTriviaTokens("a # one\n(b\nc) # two", "a # one NL ( b NL c ) # two");
+    try expectTriviaTokens("x =\n  1\ndata T = A\n  | B", "x = NL 1 NL kw:data T = A NL | B");
+    try expectTriviaTokens("#!/usr/bin/bs\n", "#!/usr/bin/bs NL");
+    try expectTriviaTokens("a#b [c, # d\ne]", "a#b [ c , # d NL e ]");
+}
+
+test "program mode still drops comments and optional line breaks" {
+    try expectTokens("a # one\n(b\nc) # two", "a NL ( b c )");
+    try expectTokens("x =\n  1", "x = 1");
 }
 
 test "backslash in double quotes escapes only quote, backslash and dollar" {
