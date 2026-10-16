@@ -14,6 +14,7 @@ test {
     _ = @import("eval.zig");
     _ = @import("exec.zig");
     _ = @import("format.zig");
+    _ = @import("format_command.zig");
     _ = @import("lexer.zig");
     _ = @import("parser.zig");
     _ = @import("prompt_words.zig");

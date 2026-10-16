@@ -1,10 +1,12 @@
 //! The `bs` command line (spec §7.1): runs a script file or `-c` code, prints
-//! the version for `-v`/`--version`, or starts the prompt when given no
-//! arguments.
+//! the version for `-v`/`--version`, formats scripts with `bs fmt` (when built
+//! with `-Dformatter=true`), or starts the prompt when given no arguments.
 const std = @import("std");
 
+const build_options = @import("build_options");
 const diagnostics = @import("diagnostics.zig");
 const eval = @import("eval.zig");
+const format_command = @import("format_command.zig");
 const lexer = @import("lexer.zig");
 const parser = @import("parser.zig");
 const repl = @import("repl.zig");
@@ -30,6 +32,19 @@ pub fn main(init: std.process.Init) !u8 {
     shell_ctx.init(init.io, init.environ_map);
     // Script mode uses default signal dispositions (spec §8.6).
     signals.restoreDefaultPipeSignal();
+
+    if (std.mem.eql(u8, command_line[1], "fmt")) {
+        // `build_options.formatter` is comptime-known, so a build without
+        // the formatter never analyses `format_command`. Keep the if/else
+        // shape: an early `return` in a comptime-true branch would make the
+        // code after it unreachable, which Zig rejects.
+        if (build_options.formatter) {
+            return format_command.run(init.gpa, &shell_ctx, command_line[2..]);
+        } else {
+            try shell_ctx.reportError("fmt: this build does not include the formatter (build with -Dformatter=true)", .{});
+            return 2;
+        }
+    }
 
     var source: Source = undefined;
     var first_script_argument: usize = undefined;
@@ -81,9 +96,7 @@ pub fn runSource(
     // Resolving a tree with syntax errors would only add confusing errors.
     if (!problems.hasErrors()) try resolve.resolve(tree_allocator, script, &problems);
     if (problems.hasErrors()) {
-        std.mem.sort(diagnostics.Diagnostic, problems.items.items, {}, isEarlier);
-        for (problems.items.items) |problem| try diagnostics.render(stderr, source, problem);
-        try stderr.flush();
+        try diagnostics.renderAll(stderr, source, problems.items.items);
         return 2;
     }
 
@@ -118,10 +131,6 @@ pub fn runSource(
 /// embedded at build time (see createVersionModule in build.zig).
 fn writeVersion(writer: *std.Io.Writer) std.Io.Writer.Error!void {
     try writer.print("bs {s} ({s})\n", .{ version.version, version.git_revision });
-}
-
-fn isEarlier(_: void, left: diagnostics.Diagnostic, right: diagnostics.Diagnostic) bool {
-    return left.source_offset < right.source_offset;
 }
 
 const TestRun = struct {

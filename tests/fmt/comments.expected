@@ -1,0 +1,13 @@
+#!/usr/bin/bs
+# Leading comment.
+
+data Light = Off # no power
+  # the lit state
+  | On Int
+
+main = { # entry
+  # first
+  echo hi
+  echo there # trailing
+  # last
+}

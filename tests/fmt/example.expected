@@ -1,0 +1,10 @@
+#!/usr/bin/bs
+data Shape = Circle Int
+  | Rect Int Int
+
+area s = match s {
+  Circle r -> add r r
+  Rect w h -> add w h # sum
+}
+for [Circle 2, Rect 3 4] \s -> echo (area s)
+echo done
