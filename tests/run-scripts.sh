@@ -6,6 +6,8 @@
 set -u
 
 bs_binary=$1
+# "with-formatter" when the binary was built with -Dformatter=true.
+formatter_mode=${2:-without-formatter}
 case $bs_binary in
   /*) ;;
   *) bs_binary=$PWD/$bs_binary ;;
@@ -59,5 +61,18 @@ for version_flag in -v --version; do
       ;;
   esac
 done
+
+# Without -Dformatter=true, `bs fmt` explains how to get it.
+if [ "$formatter_mode" = without-formatter ]; then
+  fmt_message=$("$bs_binary" fmt 2>&1 </dev/null)
+  fmt_status=$?
+  case $fmt_status:$fmt_message in
+    "2:bs: fmt: this build does not include the formatter (build with -Dformatter=true)") echo "ok   bs fmt (not included)" ;;
+    *)
+      echo "FAIL bs fmt (not included): status $fmt_status, output '$fmt_message'"
+      failure_count=$((failure_count + 1))
+      ;;
+  esac
+fi
 
 [ $failure_count -eq 0 ]

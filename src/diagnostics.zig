@@ -68,6 +68,17 @@ pub fn render(writer: *std.Io.Writer, source: Source, diagnostic: Diagnostic) st
     try writer.writeByte('\n');
 }
 
+/// Writes every diagnostic in source order, then flushes `writer`.
+pub fn renderAll(writer: *std.Io.Writer, source: Source, items: []Diagnostic) std.Io.Writer.Error!void {
+    std.mem.sort(Diagnostic, items, {}, isEarlier);
+    for (items) |diagnostic| try render(writer, source, diagnostic);
+    try writer.flush();
+}
+
+fn isEarlier(_: void, left: Diagnostic, right: Diagnostic) bool {
+    return left.source_offset < right.source_offset;
+}
+
 test "render prints location, message, line and underline" {
     const source: Source = .{ .display_name = "up.bs", .text = "echo hi\nip link set dev $nmae up\n" };
     var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
