@@ -56,7 +56,8 @@ parameter = identifier | WILDCARD ;
 
    Only top-level declarations are allowed. Constructor names are unique
    across the script, including the built-in Ok, Fail, True and False.
-   Record fields are not supported yet. *)
+   Field names are unique within a constructor; different constructors may
+   share them. *)
 data_declaration
   = KEYWORD_DATA , constructor_identifier , { identifier } ,
     "=" , constructor , { "|" , constructor }
@@ -93,6 +94,7 @@ type_atom
    unambiguous: the braces always open the arms. *)
 expression
   = block
+  | record
   | match_expression
   | lambda
   | function_call
@@ -117,6 +119,16 @@ argument_keyword = KEYWORD_DATA | KEYWORD_MAIN | KEYWORD_MATCH | WILDCARD ;
 
 list = "[" , [ expression , { "," , expression } ] , "]" ;
 
+(* A record names every field of its constructor, in any order:
+     Service { name = "web"; port = 80 }
+   It is not an atom, so it is parenthesised as an argument or a
+   scrutinee. A record constructor can also be applied positionally:
+     Service "web" 80 *)
+record = constructor_identifier , "{" , separators_opt ,
+         [ field_assignment , { separators , field_assignment } , separators_opt ] , "}" ;
+
+field_assignment = identifier , "=" , expression ;
+
 (* The value of a block is the value of its last statement. *)
 block = "{" , separators_opt , [ statement_local , { separators , statement_local } , separators_opt ] , "}" ;
 
@@ -138,8 +150,16 @@ match_arm = pattern , "->" , expression ;
 
 pattern
   = constructor_identifier , pattern_atom , { pattern_atom }   (* Just x, Fail code *)
+  | record_pattern
   | pattern_atom
   ;
+
+(* Names some of the fields; the others match anything:
+     Service { port = 80 } *)
+record_pattern = constructor_identifier , "{" , separators_opt ,
+                 [ field_pattern , { separators , field_pattern } , separators_opt ] , "}" ;
+
+field_pattern = identifier , "=" , pattern ;
 
 pattern_atom
   = WILDCARD
@@ -199,8 +219,10 @@ double_quoted_character
   ;
 
 (* $name takes the longest run of name characters; ${name} delimits it.
-   Only a name is allowed inside the braces. *)
-variable = "$" , ( name_text | "{" , name_text , "}" ) ;
+   Inside the braces the name may be followed by record fields:
+   ${svc.port}, ${host.service.name}. Without braces "." is text, so
+   "$file.txt" is the variable file followed by ".txt". *)
+variable = "$" , ( name_text | "{" , name_text , { "." , name_text } , "}" ) ;
 name_text = ( LETTER | "_" ) , { LETTER | DIGIT | "_" } ;
 
 (* A plain word is a WORD that is a single bare_text part with no escapes.

@@ -12,7 +12,8 @@ const Diagnostics = @import("diagnostics.zig").Diagnostics;
 /// A piece of a word: literal text or a variable reference.
 pub const WordPart = union(enum) {
     text: []const u8,
-    /// The name of a variable, without `$` or braces.
+    /// The name of a variable, without `$` or braces. Inside braces it may
+    /// be followed by record fields: `svc.port`.
     variable: []const u8,
 };
 
@@ -85,6 +86,15 @@ fn isIntegerText(text: []const u8) bool {
     if (digits.len == 0) return false;
     for (digits) |character| {
         if (!std.ascii.isDigit(character)) return false;
+    }
+    return true;
+}
+
+/// `name` or `name.field.field`.
+fn isValidFieldPath(text: []const u8) bool {
+    var segments = std.mem.splitScalar(u8, text, '.');
+    while (segments.next()) |segment| {
+        if (!isValidName(segment)) return false;
     }
     return true;
 }
@@ -323,7 +333,9 @@ const Tokenizer = struct {
         try tokenizer.diagnostics.add(@intCast(quote_index), 1, "unterminated double quote", .{});
     }
 
-    /// At a `$`: adds a variable part for `$name` or `${name}`. A `$` not
+    /// At a `$`: adds a variable part for `$name`, `${name}` or
+    /// `${name.field}`; only braces allow fields, so `$file.txt` is still a
+    /// variable followed by text. A `$` not
     /// followed by a name or `{` is literal text.
     fn lexVariable(tokenizer: *Tokenizer, builder: *WordBuilder) std.mem.Allocator.Error!void {
         const text = tokenizer.text;
@@ -340,7 +352,7 @@ const Tokenizer = struct {
             const name_start = after_dollar + 1;
             if (std.mem.findScalarPos(u8, text, name_start, '}')) |closing_index| {
                 const name = text[name_start..closing_index];
-                if (isValidName(name)) {
+                if (isValidFieldPath(name)) {
                     try builder.appendVariable(name);
                     tokenizer.index = closing_index + 1;
                     return;
@@ -510,6 +522,7 @@ test "quoted parts and variables" {
     try expectTokens("'' \"\"", "\"\" \"\"");
     try expectTokens("$name ${name}_x pre$x.txt $ a$", "\"${name}\" \"${name}_x\" \"pre${x}.txt\" $ a$");
     try expectTokens("\\$x a\\ b", "\"$x\" \"a b\"");
+    try expectTokens("${svc.port} \"on ${a.b.c}\" $svc.port", "\"${svc.port}\" \"on ${a.b.c}\" \"${svc}.port\"");
 }
 
 test "backslash in double quotes escapes only quote, backslash and dollar" {
@@ -562,6 +575,8 @@ test "lexical errors" {
     try expectLexError("echo \"abc", "unterminated double quote");
     try expectLexError("echo abc\\", "a backslash cannot end a line");
     try expectLexError("echo ${1x}", "expected a variable name and '}' after '${'");
+    try expectLexError("echo ${a.}", "expected a variable name and '}' after '${'");
+    try expectLexError("echo ${a..b}", "expected a variable name and '}' after '${'");
     try expectLexError("echo ${}", "expected a variable name and '}' after '${'");
     try expectLexError("echo ${", "expected a variable name and '}' after '${'");
 }

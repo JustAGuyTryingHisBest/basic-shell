@@ -54,15 +54,29 @@ fn plural(count: usize) []const u8 {
     return if (count == 1) "" else "s";
 }
 
+/// What the resolver knows about a constructor.
+const ConstructorInfo = struct {
+    arity: usize,
+    /// One per field for a record, in declaration order; empty otherwise.
+    field_names: []const []const u8 = &.{},
+    is_record: bool = false,
+
+    fn fieldIndex(info: ConstructorInfo, field_name: []const u8) ?usize {
+        for (info.field_names, 0..) |candidate, index| {
+            if (std.mem.eql(u8, candidate, field_name)) return index;
+        }
+        return null;
+    }
+};
+
 const Resolver = struct {
     allocator: Allocator,
     diagnostics: *Diagnostics,
     /// Top-level definitions with parameters, visible everywhere.
     functions: std.StringHashMapUnmanaged(*ast.Definition) = .empty,
-    /// Every constructor, built in or declared by `data`, with its number
-    /// of fields. Declarations are hoisted, so this is complete before any
-    /// expression is resolved.
-    constructor_arities: std.StringHashMapUnmanaged(usize) = .empty,
+    /// Every constructor, built in or declared by `data`. Declarations are
+    /// hoisted, so this is complete before any expression is resolved.
+    constructors: std.StringHashMapUnmanaged(ConstructorInfo) = .empty,
 
     fn report(resolver: *Resolver, source_offset: u32, comptime format: []const u8, arguments: anytype) Allocator.Error!void {
         try resolver.diagnostics.add(source_offset, 1, format, arguments);
@@ -119,7 +133,7 @@ const Resolver = struct {
     /// `data` declaration, rejecting duplicate type and constructor names.
     fn collectConstructors(resolver: *Resolver, statements: []const ast.Statement) Allocator.Error!void {
         for (ast.builtin_constructors) |constructor| {
-            try resolver.constructor_arities.put(resolver.allocator, constructor.name, constructor.arity);
+            try resolver.constructors.put(resolver.allocator, constructor.name, .{ .arity = constructor.arity });
         }
         var type_names: std.StringHashMapUnmanaged(void) = .empty;
         for (ast.builtin_type_names) |type_name| try type_names.put(resolver.allocator, type_name, {});
@@ -140,12 +154,24 @@ const Resolver = struct {
                 }
             }
             for (data_declaration.constructors) |constructor| {
-                const entry = try resolver.constructor_arities.getOrPut(resolver.allocator, constructor.name);
+                const entry = try resolver.constructors.getOrPut(resolver.allocator, constructor.name);
                 if (entry.found_existing) {
                     try resolver.report(constructor.source_offset, "constructor '{s}' is already defined", .{constructor.name});
                     continue;
                 }
-                entry.value_ptr.* = constructor.field_types.len;
+                entry.value_ptr.* = .{
+                    .arity = constructor.field_types.len,
+                    .field_names = constructor.field_names,
+                    .is_record = constructor.is_record,
+                };
+                for (constructor.field_names, 0..) |field_name, index| {
+                    for (constructor.field_names[0..index]) |earlier_field_name| {
+                        if (std.mem.eql(u8, field_name, earlier_field_name)) {
+                            try resolver.report(constructor.source_offset, "field '{s}' appears twice in '{s}'", .{ field_name, constructor.name });
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
@@ -184,6 +210,7 @@ const Resolver = struct {
                 try resolver.resolveExpression(element, scope, .expression_argument);
             },
             .call => try resolver.resolveCall(expression, scope, slot),
+            .record => |record| try resolver.resolveRecord(expression, record, scope),
             .block => |statements| try resolver.resolveBlock(statements, scope),
             .match => |match| try resolver.resolveMatch(match, scope, slot),
             .lambda => |lambda| {
@@ -216,7 +243,7 @@ const Resolver = struct {
                 expression.data = .{ .literal_string = text };
             },
             .constructor => {
-                if (!isHeadSlot(slot) and !resolver.constructor_arities.contains(text)) {
+                if (!isHeadSlot(slot) and !resolver.constructors.contains(text)) {
                     return resolver.report(expression.source_offset, "undefined constructor '{s}'", .{text});
                 }
                 try resolver.resolveLoneWordAsCall(expression, scope, if (isHeadSlot(slot)) slot else .value);
@@ -254,7 +281,7 @@ const Resolver = struct {
         if (word.parts.len == 1) {
             expression.data = switch (word.parts[0]) {
                 .text => |text| .{ .literal_string = text },
-                .variable => |name| .{ .variable = dollarVariable(name, scope) },
+                .variable => |name| .{ .variable = try resolver.dollarVariable(name, scope, expression.source_offset) },
             };
             return;
         }
@@ -262,7 +289,7 @@ const Resolver = struct {
         for (parts, word.parts) |*part, word_part| {
             part.* = switch (word_part) {
                 .text => |text| .{ .text = text },
-                .variable => |name| .{ .variable = dollarVariable(name, scope) },
+                .variable => |name| .{ .variable = try resolver.dollarVariable(name, scope, expression.source_offset) },
             };
         }
         expression.data = .{ .interpolated = parts };
@@ -327,7 +354,14 @@ const Resolver = struct {
                     call.head_kind = .external;
                 }
             },
-            .constructor => call.head_kind = if (resolver.constructor_arities.contains(name)) .constructor else .external,
+            .constructor => {
+                if (resolver.constructors.get(name)) |info| {
+                    call.head_kind = .constructor;
+                    call.field_names = info.field_names;
+                } else {
+                    call.head_kind = .external;
+                }
+            },
             .integer, .literal => call.head_kind = .external,
         }
     }
@@ -342,7 +376,7 @@ const Resolver = struct {
                 }
             },
             .constructor => {
-                const expected = resolver.constructor_arities.get(call.name).?;
+                const expected = resolver.constructors.get(call.name).?.arity;
                 if (argument_count != expected) {
                     try resolver.report(source_offset, "'{s}' takes {d} field{s}, got {d}", .{ call.name, expected, plural(expected), argument_count });
                 }
@@ -377,7 +411,8 @@ const Resolver = struct {
             .wildcard, .literal_string, .literal_integer => return scope,
             .binder => |name| return try resolver.extend(scope, name),
             .constructor => |constructor| {
-                if (resolver.constructor_arities.get(constructor.name)) |expected| {
+                if (resolver.constructors.get(constructor.name)) |info| {
+                    const expected = info.arity;
                     if (expected != constructor.fields.len) {
                         try resolver.report(pattern.source_offset, "'{s}' takes {d} field{s}, got {d}", .{ constructor.name, expected, plural(expected), constructor.fields.len });
                     }
@@ -388,6 +423,26 @@ const Resolver = struct {
                 for (constructor.fields) |field| extended = try resolver.resolvePattern(field, extended);
                 return extended;
             },
+            .record => |record| {
+                var extended = scope;
+                for (record.fields) |field| extended = try resolver.resolvePattern(field.pattern, extended);
+                const info = try resolver.recordConstructor(pattern.source_offset, record.constructor_name) orelse return extended;
+                // Fills the fields the record pattern does not name.
+                const wildcard = try resolver.allocator.create(ast.Pattern);
+                wildcard.* = .{ .source_offset = pattern.source_offset, .data = .wildcard };
+                const field_patterns = try resolver.allocator.alloc(*ast.Pattern, info.arity);
+                @memset(field_patterns, wildcard);
+                var is_valid = true;
+                for (record.fields, 0..) |field, index| {
+                    const field_index = try resolver.namedFieldIndex(info, record.constructor_name, record.fields[0..index], field.name, field.source_offset) orelse {
+                        is_valid = false;
+                        continue;
+                    };
+                    field_patterns[field_index] = field.pattern;
+                }
+                if (is_valid) pattern.data = .{ .constructor = .{ .name = record.constructor_name, .fields = field_patterns } };
+                return extended;
+            },
             .list => |elements| {
                 var extended = scope;
                 for (elements) |element| extended = try resolver.resolvePattern(element, extended);
@@ -395,11 +450,96 @@ const Resolver = struct {
             },
         }
     }
-};
 
-fn dollarVariable(name: []const u8, scope: ?*const Scope) ast.Variable {
-    return .{ .name = name, .may_be_environment = !isBound(scope, name) };
-}
+    /// `Service { name = web; port = 80 }` becomes `Service web 80`, so the
+    /// evaluator only sees positional constructor calls.
+    fn resolveRecord(resolver: *Resolver, expression: *ast.Expression, record: ast.Record, scope: ?*const Scope) Allocator.Error!void {
+        for (record.fields) |field| try resolver.resolveExpression(field.value, scope, .expression_argument);
+        const info = try resolver.recordConstructor(expression.source_offset, record.constructor_name) orelse return;
+        const arguments = try resolver.allocator.alloc(?*ast.Expression, info.arity);
+        @memset(arguments, null);
+        var is_valid = true;
+        for (record.fields, 0..) |field, index| {
+            const field_index = try resolver.namedFieldIndex(info, record.constructor_name, record.fields[0..index], field.name, field.source_offset) orelse {
+                is_valid = false;
+                continue;
+            };
+            arguments[field_index] = field.value;
+        }
+        const positional_arguments = try resolver.allocator.alloc(*ast.Expression, info.arity);
+        for (arguments, positional_arguments, info.field_names) |argument, *positional_argument, field_name| {
+            positional_argument.* = argument orelse {
+                try resolver.report(expression.source_offset, "missing field '{s}' in '{s}'", .{ field_name, record.constructor_name });
+                is_valid = false;
+                continue;
+            };
+        }
+        if (!is_valid) return;
+        const head = try resolver.allocator.create(ast.Expression);
+        head.* = .{ .source_offset = expression.source_offset, .data = .{ .literal_string = record.constructor_name } };
+        expression.data = .{ .call = .{
+            .head = head,
+            .arguments = positional_arguments,
+            .head_kind = .constructor,
+            .name = record.constructor_name,
+            .field_names = info.field_names,
+        } };
+    }
+
+    /// The constructor named in a record expression or pattern, if it is one
+    /// declared with fields.
+    fn recordConstructor(resolver: *Resolver, source_offset: u32, constructor_name: []const u8) Allocator.Error!?ConstructorInfo {
+        const info = resolver.constructors.get(constructor_name) orelse {
+            try resolver.report(source_offset, "undefined constructor '{s}'", .{constructor_name});
+            return null;
+        };
+        if (!info.is_record) {
+            try resolver.report(source_offset, "'{s}' has no named fields", .{constructor_name});
+            return null;
+        }
+        return info;
+    }
+
+    /// The position of `field_name` in a record, reporting unknown fields and
+    /// fields already named in `earlier_fields`.
+    fn namedFieldIndex(
+        resolver: *Resolver,
+        info: ConstructorInfo,
+        constructor_name: []const u8,
+        earlier_fields: anytype,
+        field_name: []const u8,
+        source_offset: u32,
+    ) Allocator.Error!?usize {
+        const field_index = info.fieldIndex(field_name) orelse {
+            try resolver.report(source_offset, "'{s}' has no field '{s}'", .{ constructor_name, field_name });
+            return null;
+        };
+        for (earlier_fields) |earlier_field| {
+            if (std.mem.eql(u8, earlier_field.name, field_name)) {
+                try resolver.report(source_offset, "field '{s}' is given twice", .{field_name});
+                return null;
+            }
+        }
+        return field_index;
+    }
+
+    /// `$name` or `${name.field}`. Only a bound variable can have fields.
+    fn dollarVariable(resolver: *Resolver, text: []const u8, scope: ?*const Scope, source_offset: u32) Allocator.Error!ast.Variable {
+        const name_end = std.mem.findScalar(u8, text, '.') orelse text.len;
+        const name = text[0..name_end];
+        const is_bound = isBound(scope, name);
+        if (name_end == text.len) return .{ .name = name, .may_be_environment = !is_bound };
+        if (!is_bound) try resolver.report(source_offset, "undefined variable '{s}'", .{name});
+        var field_path: std.ArrayList([]const u8) = .empty;
+        var segments = std.mem.splitScalar(u8, text[name_end + 1 ..], '.');
+        while (segments.next()) |segment| try field_path.append(resolver.allocator, segment);
+        return .{
+            .name = name,
+            .field_path = try field_path.toOwnedSlice(resolver.allocator),
+            .may_be_environment = false,
+        };
+    }
+};
 
 /// Marks the calls in tail position of a function or lambda body, so the
 /// evaluator runs them without growing the stack (spec §8.4).
@@ -519,6 +659,24 @@ test "user constructors" {
         "(def show (m) (match $m (Nothing -> (builtin echo 'none')) ((Just x) -> (builtin echo $x))))\n(function show (constructor Just 3))\n(data Maybe a (Nothing) (Just a))\n",
     );
     try expectResolved("data T = A | B\nx = A\nf A", "(data T (A) (B))\n(def x () (constructor A))\n(external:status f 'A')\n");
+}
+
+test "records become positional" {
+    try expectResolved(
+        "data S = S { a :: Int; b :: String }\nx = S { b = \"hi\"; a = 1 }\nmatch x { S { b = v } -> echo ${x.a} $v }",
+        "(data S (S { a :: Int; b :: String }))\n(def x () (constructor S 1 'hi'))\n(match $x ((S _ v) -> (builtin echo $x.a $v)))\n",
+    );
+}
+
+test "record errors" {
+    try expectResolveErrors("data S = S { a :: Int; a :: Int }", &.{"field 'a' appears twice in 'S'"});
+    try expectResolveErrors("data S = S { a :: Int; b :: Int }\nx = S { a = 1 }", &.{"missing field 'b' in 'S'"});
+    try expectResolveErrors("data S = S { a :: Int }\nx = S { a = 1; a = 2 }", &.{"field 'a' is given twice"});
+    try expectResolveErrors("data S = S { a :: Int }\nx = S { c = 1; a = 2 }", &.{"'S' has no field 'c'"});
+    try expectResolveErrors("data S = P Int\nx = P { a = 1 }", &.{"'P' has no named fields"});
+    try expectResolveErrors("x = Q { a = 1 }", &.{"undefined constructor 'Q'"});
+    try expectResolveErrors("data S = S { a :: Int }\nmatch S 1 { S { q = _ } -> skip }", &.{"'S' has no field 'q'"});
+    try expectResolveErrors("echo ${HOME.x}", &.{"undefined variable 'HOME'"});
 }
 
 test "data declaration errors" {

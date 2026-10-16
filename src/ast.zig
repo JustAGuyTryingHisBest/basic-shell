@@ -55,12 +55,17 @@ pub const DataDeclaration = struct {
     constructors: []const ConstructorDeclaration,
 };
 
-/// One alternative of a `data` declaration, such as `Just a`.
+/// One alternative of a `data` declaration, such as `Just a` or
+/// `Service { name :: String; port :: Int }`.
 pub const ConstructorDeclaration = struct {
     source_offset: u32,
     name: []const u8,
     /// Parsed but not yet checked (spec §6).
     field_types: []const *TypeExpression,
+    /// One per field for a record, in declaration order; empty otherwise.
+    field_names: []const []const u8 = &.{},
+    /// Declared with `{ ... }`, even if it has no fields.
+    is_record: bool = false,
 };
 
 /// Parsed but not yet checked (spec §6).
@@ -95,6 +100,9 @@ pub const Expression = struct {
         function_reference: *Definition,
         list: []const *Expression,
         call: Call,
+        /// `Service { name = web; port = 80 }`; only before `resolve`,
+        /// which turns it into a constructor call with positional arguments.
+        record: Record,
         block: []const Statement,
         match: Match,
         lambda: Lambda,
@@ -107,9 +115,11 @@ pub const InterpolationPart = union(enum) {
     variable: Variable,
 };
 
-/// A `$name` reference.
+/// A `$name` or `${name.field.field}` reference.
 pub const Variable = struct {
     name: []const u8,
+    /// Record fields selected from the variable's value, outermost first.
+    field_path: []const []const u8 = &.{},
     /// True for a `$name` that is not bound in the script: it is then read
     /// from the environment at runtime (spec §5.9).
     may_be_environment: bool,
@@ -126,10 +136,25 @@ pub const Call = struct {
     builtin: ?Builtin = null,
     /// The program, function or constructor name.
     name: []const u8 = "",
+    /// For a `.constructor` declared as a record: its field names.
+    field_names: []const []const u8 = &.{},
     /// For `.external` (spec §5.5).
     context: Context = .status,
     /// In tail position of a function or lambda body (spec §8.4).
     is_tail: bool = false,
+};
+
+/// A record built with named fields, before `resolve`.
+pub const Record = struct {
+    constructor_name: []const u8,
+    fields: []const FieldAssignment,
+};
+
+/// One `field = value` of a record expression.
+pub const FieldAssignment = struct {
+    source_offset: u32,
+    name: []const u8,
+    value: *Expression,
 };
 
 /// What the head of a call turned out to be.
@@ -175,8 +200,24 @@ pub const Pattern = struct {
         literal_string: []const u8,
         literal_integer: i64,
         constructor: ConstructorPattern,
+        /// `Service { port = p }`; only before `resolve`, which turns it
+        /// into a `.constructor` pattern with `_` for the fields not named.
+        record: RecordPattern,
         list: []const *Pattern,
     };
+};
+
+/// A record pattern naming some of the constructor's fields.
+pub const RecordPattern = struct {
+    constructor_name: []const u8,
+    fields: []const FieldPattern,
+};
+
+/// One `field = pattern` of a record pattern.
+pub const FieldPattern = struct {
+    source_offset: u32,
+    name: []const u8,
+    pattern: *Pattern,
 };
 
 /// A constructor pattern such as `Fail code`.
@@ -269,10 +310,15 @@ pub fn dumpStatement(writer: *std.Io.Writer, statement: Statement) std.Io.Writer
             for (data_declaration.type_parameters) |type_parameter| try writer.print(" {s}", .{type_parameter});
             for (data_declaration.constructors) |constructor| {
                 try writer.print(" ({s}", .{constructor.name});
-                for (constructor.field_types) |field_type| {
-                    try writer.writeByte(' ');
+                if (constructor.is_record) try writer.writeAll(" {");
+                for (constructor.field_types, 0..) |field_type, index| {
+                    if (constructor.is_record) {
+                        if (index != 0) try writer.writeByte(';');
+                        try writer.print(" {s} :: ", .{constructor.field_names[index]});
+                    } else try writer.writeByte(' ');
                     try dumpType(writer, field_type);
                 }
+                if (constructor.is_record) try writer.writeAll(" }");
                 try writer.writeByte(')');
             }
             try writer.writeByte(')');
@@ -316,6 +362,15 @@ pub fn dumpExpression(writer: *std.Io.Writer, expression: *const Expression) std
             try writer.writeByte(']');
         },
         .call => |call| try dumpCall(writer, call),
+        .record => |record| {
+            try writer.print("({s} {{", .{record.constructor_name});
+            for (record.fields, 0..) |field, index| {
+                if (index != 0) try writer.writeByte(';');
+                try writer.print(" {s} = ", .{field.name});
+                try dumpExpression(writer, field.value);
+            }
+            try writer.writeAll(" })");
+        },
         .block => |statements| {
             try writer.writeAll("(block");
             for (statements) |statement| {
@@ -353,7 +408,9 @@ pub fn dumpExpression(writer: *std.Io.Writer, expression: *const Expression) std
 }
 
 fn dumpVariable(writer: *std.Io.Writer, variable: Variable) std.Io.Writer.Error!void {
-    try writer.print("${s}{s}", .{ variable.name, if (variable.may_be_environment) "?" else "" });
+    try writer.print("${s}", .{variable.name});
+    for (variable.field_path) |field_name| try writer.print(".{s}", .{field_name});
+    if (variable.may_be_environment) try writer.writeByte('?');
 }
 
 fn dumpCall(writer: *std.Io.Writer, call: Call) std.Io.Writer.Error!void {
@@ -392,6 +449,15 @@ fn dumpPattern(writer: *std.Io.Writer, pattern: *const Pattern) std.Io.Writer.Er
                 try dumpPattern(writer, field);
             }
             try writer.writeByte(')');
+        },
+        .record => |record| {
+            try writer.print("({s} {{", .{record.constructor_name});
+            for (record.fields, 0..) |field, index| {
+                if (index != 0) try writer.writeByte(';');
+                try writer.print(" {s} = ", .{field.name});
+                try dumpPattern(writer, field.pattern);
+            }
+            try writer.writeAll(" })");
         },
         .list => |elements| {
             try writer.writeByte('[');

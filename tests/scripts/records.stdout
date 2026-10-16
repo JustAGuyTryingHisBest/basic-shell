@@ -1,0 +1,6 @@
+web on 80
+23
+web
+http
+other: ssh
+ssh 22

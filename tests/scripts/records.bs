@@ -1,0 +1,17 @@
+data Service = Service {
+  name :: String
+  port :: Int
+}
+data Host = Host { address :: String; service :: Service } | Offline
+
+svc = Service { port = 80; name = "web" }
+other = Service "ssh" 22
+echo "${svc.name} on ${svc.port}"
+echo (add ${other.port} 1)
+h = Host { address = "10.0.0.1"; service = svc }
+echo ${h.service.name}
+for [svc, other] \s -> match s {
+  Service { port = 80 } -> echo http
+  Service { name = n } -> echo "other: $n"
+}
+match (Host { address = "10.0.0.2"; service = other }) { Host { service = Service n p } -> echo $n $p }

@@ -250,7 +250,7 @@ pub const Interpreter = struct {
 
     fn evalExpression(interpreter: *Interpreter, expression: *const ast.Expression, environment: ?*const Environment) EvalError!Value {
         switch (expression.data) {
-            .word => unreachable, // `resolve` rewrites every word
+            .word, .record => unreachable, // `resolve` rewrites every word and record
             .literal_string => |text| return .{ .string = text },
             .literal_integer => |integer| return .{ .integer = integer },
             .interpolated => |parts| return interpreter.evalInterpolated(parts, environment, expression.source_offset),
@@ -306,6 +306,21 @@ pub const Interpreter = struct {
     }
 
     fn lookupVariable(interpreter: *Interpreter, variable: ast.Variable, environment: ?*const Environment, source_offset: u32) EvalError!Value {
+        var selected = try interpreter.lookupName(variable, environment, source_offset);
+        for (variable.field_path) |field_name| {
+            const record = switch (selected) {
+                .constructor => |constructor| constructor,
+                else => return interpreter.raise(source_offset, "{s} has no field '{s}'", .{ value.describe(selected), field_name }),
+            };
+            const field_index = for (record.field_names, 0..) |candidate, index| {
+                if (std.mem.eql(u8, candidate, field_name)) break index;
+            } else return interpreter.raise(source_offset, "'{s}' has no field '{s}'", .{ record.name, field_name });
+            selected = record.fields[field_index];
+        }
+        return selected;
+    }
+
+    fn lookupName(interpreter: *Interpreter, variable: ast.Variable, environment: ?*const Environment, source_offset: u32) EvalError!Value {
         if (Environment.lookup(environment, variable.name)) |found| return found;
         if (variable.may_be_environment) {
             const text = interpreter.shell_ctx.env_vars.get(variable.name) orelse
@@ -331,6 +346,7 @@ pub const Interpreter = struct {
             .constructor => return .{ .value = .{ .constructor = .{
                 .name = call.name,
                 .fields = try interpreter.evalValues(call.arguments, environment),
+                .field_names = call.field_names,
             } } },
             .builtin => return .{ .value = try interpreter.evalBuiltin(expression, call, environment) },
             .external => return .{ .value = try interpreter.evalExternal(expression, call, environment) },
@@ -429,6 +445,7 @@ pub const Interpreter = struct {
 
     fn matchPattern(interpreter: *Interpreter, pattern: *const ast.Pattern, candidate: Value, environment: *?*const Environment) Allocator.Error!bool {
         switch (pattern.data) {
+            .record => unreachable, // `resolve` makes it a `.constructor` pattern
             .wildcard => return true,
             .binder => |name| {
                 environment.* = try interpreter.bind(environment.*, name, candidate);
@@ -691,6 +708,27 @@ test "user data types" {
         "data Maybe a = Nothing | Just a\nshow m = match m {\n  Nothing -> echo none\n  Just (Just x) -> echo \"nested $x\"\n  Just x -> echo \"just $x\"\n}\nshow Nothing\nshow (Just 4)\nshow (Just (Just 5))\n",
         "none\njust 4\nnested 5\n",
     );
+}
+
+test "records" {
+    try expectOutput(
+        "data Service = Service {\n  name :: String\n  port :: Int\n}\nsvc = Service { port = 80; name = \"web\" }\necho \"${svc.name}:${svc.port}\" (add ${svc.port} 1)\nmatch Service \"ssh\" 22 {\n  Service { port = 80 } -> echo http\n  Service { name = n } -> echo $n\n}\n",
+        "web:80 81\nssh\n",
+    );
+}
+
+test "nested field paths" {
+    try expectOutput(
+        "data Box = Box { inner :: Box } | Leaf { label :: String }\nb = Box { inner = Box { inner = Leaf { label = \"deep\" } } }\necho ${b.inner.inner.label}\n",
+        "deep\n",
+    );
+}
+
+test "a missing field is a runtime error" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const outcome = try runForTest(arena.allocator(), "data T = A { x :: Int } | B { y :: Int }\nv = B { y = 1 }\necho ${v.x}\n", .{});
+    try std.testing.expect(std.mem.find(u8, outcome.stderr, "'B' has no field 'x'") != null);
 }
 
 test "a constructor can be used before its declaration" {

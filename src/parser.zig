@@ -251,7 +251,24 @@ const Parser = struct {
             return parser.fail(parser.peek(), "expected a constructor name starting with an uppercase letter, found {s}", .{lexer.describeTag(parser.peekTag())});
         }
         const name_token = parser.advance();
-        if (parser.peekTag() == .left_brace) return parser.fail(parser.peek(), "record declarations are not supported yet", .{});
+        if (parser.peekTag() == .left_brace) {
+            _ = parser.advance();
+            const fields = try parser.parseSequence(RecordFieldDeclaration, parseRecordFieldDeclaration, .right_brace);
+            _ = try parser.expect(.right_brace, "'}'");
+            const field_names = try parser.allocator.alloc([]const u8, fields.len);
+            const record_field_types = try parser.allocator.alloc(*ast.TypeExpression, fields.len);
+            for (fields, field_names, record_field_types) |field, *field_name, *field_type| {
+                field_name.* = field.name;
+                field_type.* = field.field_type;
+            }
+            return .{
+                .source_offset = name_token.source_offset,
+                .name = name_token.plainText(),
+                .field_types = record_field_types,
+                .field_names = field_names,
+                .is_record = true,
+            };
+        }
         var field_types: std.ArrayList(*ast.TypeExpression) = .empty;
         while (parser.startsTypeAtom()) try field_types.append(parser.allocator, try parser.parseTypeAtom());
         return .{
@@ -259,6 +276,48 @@ const Parser = struct {
             .name = name_token.plainText(),
             .field_types = try field_types.toOwnedSlice(parser.allocator),
         };
+    }
+
+    const RecordFieldDeclaration = struct { name: []const u8, field_type: *ast.TypeExpression };
+
+    /// `name :: Type` inside a record declaration.
+    fn parseRecordFieldDeclaration(parser: *Parser) ParseError!RecordFieldDeclaration {
+        const name = try parser.parseFieldName();
+        _ = try parser.expect(.double_colon, "'::' after the field name");
+        return .{ .name = name, .field_type = try parser.parseType() };
+    }
+
+    fn parseFieldName(parser: *Parser) ParseError![]const u8 {
+        if (!parser.peekIsIdentifier()) {
+            return parser.fail(parser.peek(), "expected a field name, found {s}", .{lexer.describeTag(parser.peekTag())});
+        }
+        return parser.checkedName(parser.advance());
+    }
+
+    /// `Service { name = web; port = 80 }`.
+    fn parseRecord(parser: *Parser) ParseError!*ast.Expression {
+        const constructor_token = parser.advance();
+        _ = parser.advance(); // `{`
+        const fields = try parser.parseSequence(ast.FieldAssignment, parseFieldAssignment, .right_brace);
+        _ = try parser.expect(.right_brace, "'}'");
+        return parser.newExpression(constructor_token.source_offset, .{ .record = .{
+            .constructor_name = constructor_token.plainText(),
+            .fields = fields,
+        } });
+    }
+
+    fn parseFieldAssignment(parser: *Parser) ParseError!ast.FieldAssignment {
+        const source_offset = parser.peek().source_offset;
+        const name = try parser.parseFieldName();
+        _ = try parser.expect(.equals, "'=' after the field name");
+        return .{ .source_offset = source_offset, .name = name, .value = try parser.parseExpression() };
+    }
+
+    fn parseFieldPattern(parser: *Parser) ParseError!ast.FieldPattern {
+        const source_offset = parser.peek().source_offset;
+        const name = try parser.parseFieldName();
+        _ = try parser.expect(.equals, "'=' after the field name");
+        return .{ .source_offset = source_offset, .name = name, .pattern = try parser.parsePattern() };
     }
 
     fn parseSignature(parser: *Parser) ParseError!ast.Statement {
@@ -337,7 +396,11 @@ const Parser = struct {
             .left_brace => parser.parseBlock(),
             .keyword_match => parser.parseMatch(),
             .lambda => parser.parseLambda(),
-            .word, .left_paren, .left_bracket => parser.parseApplication(try parser.parseAtom()),
+            .word => if (parser.peekIsConstructor() and parser.peekTagAfter(1) == .left_brace)
+                parser.parseRecord()
+            else
+                parser.parseApplication(try parser.parseAtom()),
+            .left_paren, .left_bracket => parser.parseApplication(try parser.parseAtom()),
             else => parser.fail(parser.peek(), "expected an expression, found {s}", .{lexer.describeTag(parser.peekTag())}),
         };
     }
@@ -458,6 +521,15 @@ const Parser = struct {
         const token = parser.peek();
         if (parser.peekIsConstructor()) {
             _ = parser.advance();
+            if (parser.peekTag() == .left_brace) {
+                _ = parser.advance();
+                const field_patterns = try parser.parseSequence(ast.FieldPattern, parseFieldPattern, .right_brace);
+                _ = try parser.expect(.right_brace, "'}'");
+                return parser.newPattern(token.source_offset, .{ .record = .{
+                    .constructor_name = token.plainText(),
+                    .fields = field_patterns,
+                } });
+            }
             var fields: std.ArrayList(*ast.Pattern) = .empty;
             while (startsPatternAtom(parser.peekTag())) try fields.append(parser.allocator, try parser.parsePatternAtom());
             return parser.newPattern(token.source_offset, .{ .constructor = .{
@@ -618,6 +690,21 @@ test "data declarations" {
         "(data Shape (Circle Int) (Rect Int Int) (Poly [(Maybe Int)]))\n",
     );
     try expectParse("data Pair a b = Pair a (a -> b)", "(data Pair a b (Pair a (-> a b)))\n");
+    try expectParse(
+        "data Service = Service {\n  name :: String\n  port :: Int\n} | Down {}",
+        "(data Service (Service { name :: String; port :: Int }) (Down { }))\n",
+    );
+}
+
+test "records" {
+    try expectParse("svc = Service { name = web; port = add 1 2 }", "(def svc () (Service { name = web; port = (call add 1 2) }))\n");
+    try expectParse("f (Down {})", "(call f (Down { }))\n");
+    try expectParse(
+        "match s { Service { port = 80 } -> skip; Service { name = n; port = (Just p) } -> skip }",
+        "(match s ((Service { port = 80 }) -> skip) ((Service { name = n; port = (Just p) }) -> skip))\n",
+    );
+    try expectParse("match Dot { Dot -> skip }", "(match Dot (Dot -> skip))\n");
+    try expectParse("echo ${svc.port}", "(call echo \"${svc.port}\")\n");
 }
 
 test "separators" {
@@ -629,7 +716,9 @@ test "syntax errors are all reported" {
     try expectParseErrors("data T = a", &.{"expected a constructor name starting with an uppercase letter, found a word"});
     try expectParseErrors("data T = A |", &.{"expected a constructor name starting with an uppercase letter, found the end of the input"});
     try expectParseErrors("data T A = A", &.{"expected a type variable or '=', found a word"});
-    try expectParseErrors("data T = T { x :: Int }", &.{"record declarations are not supported yet"});
+    try expectParseErrors("data T = T { x Int }", &.{"expected '::' after the field name, found a word"});
+    try expectParseErrors("x = T { X = 1 }", &.{"expected a field name, found a word"});
+    try expectParseErrors("x = T { a 1 }", &.{"expected '=' after the field name, found a word"});
     try expectParseErrors("f (a", &.{"expected ')', found the end of the input"});
     try expectParseErrors("x = )\ny = )", &.{ "expected an expression, found ')'", "expected an expression, found ')'" });
     try expectParseErrors("f { a }", &.{"expected a new line or ';' before '{'"});

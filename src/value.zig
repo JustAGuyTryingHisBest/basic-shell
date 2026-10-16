@@ -49,6 +49,8 @@ pub fn makeFail(allocator: Allocator, exit_status: u8) Allocator.Error!Value {
 pub const Constructor = struct {
     name: []const u8,
     fields: []const Value,
+    /// For a record, one name per field; they live in the syntax tree.
+    field_names: []const []const u8 = &.{},
 };
 
 /// A function value made by a `\` lambda, with the environment it closed over.
@@ -186,6 +188,7 @@ pub fn deepCopy(allocator: Allocator, copied: Value, escape_threshold_frame_id: 
         .constructor => |constructor| return .{ .constructor = .{
             .name = constructor.name,
             .fields = try deepCopyAll(allocator, constructor.fields, escape_threshold_frame_id),
+            .field_names = constructor.field_names,
         } },
         .closure => |closure| {
             if (closure.frame_id >= escape_threshold_frame_id) return error.EscapingClosure;

@@ -1,0 +1,4 @@
+data Light = Off | On { level :: Int }
+
+light = Off
+echo ${light.level}

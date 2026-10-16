@@ -1,0 +1,3 @@
+records_error.bs:4:6: error: 'Off' has no field 'level'
+    4 | echo ${light.level}
+      |      ^
