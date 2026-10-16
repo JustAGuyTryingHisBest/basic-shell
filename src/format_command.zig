@@ -71,21 +71,39 @@ fn formatFile(gpa: Allocator, shell_ctx: *ShellCtx, path: []const u8, check_only
         try stdout.flush();
         return 1;
     }
-    writeInPlace(shell_ctx.io, allocator, path, text) catch |err| {
+    // Through a symlink, replace the target and keep the link.
+    const real_path = std.Io.Dir.cwd().realPathFileAlloc(shell_ctx.io, path, allocator) catch |err| {
         try shell_ctx.reportError("fmt: {s}: {s}", .{ path, ShellCtx.describeFileError(err) });
         return 1;
+    };
+    const temporary_path = try std.fmt.allocPrint(allocator, "{s}.bs-fmt", .{real_path});
+    writeInPlace(shell_ctx.io, real_path, temporary_path, text) catch |err| switch (err) {
+        error.PathAlreadyExists => {
+            try shell_ctx.reportError("fmt: {s}: already exists; remove it and try again", .{temporary_path});
+            return 1;
+        },
+        else => {
+            try shell_ctx.reportError("fmt: {s}: {s}", .{ path, ShellCtx.describeFileError(err) });
+            return 1;
+        },
     };
     return 0;
 }
 
-/// Replaces the file at `path` with `text` through `PATH.bs-fmt` in the
-/// same directory, keeping the file's permission bits (spec §2.3).
-fn writeInPlace(io: std.Io, allocator: Allocator, path: []const u8, text: []const u8) !void {
+/// Replaces the file at `path` with `text` through `temporary_path` in the
+/// same directory, keeping the file's permission bits (spec §2.3). An
+/// existing file at `temporary_path` is never touched: creating it fails
+/// with `error.PathAlreadyExists`.
+fn writeInPlace(io: std.Io, path: []const u8, temporary_path: []const u8, text: []const u8) !void {
     const cwd = std.Io.Dir.cwd();
     const original = try cwd.statFile(io, path, .{});
-    const temporary_path = try std.fmt.allocPrint(allocator, "{s}.bs-fmt", .{path});
+    const temporary_file = try cwd.createFile(io, temporary_path, .{ .exclusive = true, .permissions = original.permissions });
+    // Only a file this call created is removed on failure.
     errdefer cwd.deleteFile(io, temporary_path) catch {};
-    try cwd.writeFile(io, .{ .sub_path = temporary_path, .data = text, .flags = .{ .permissions = original.permissions } });
+    {
+        defer temporary_file.close(io);
+        try temporary_file.writeStreamingAll(io, text);
+    }
     // Creating the file applied the umask; set the bits exactly.
     try cwd.setFilePermissions(io, temporary_path, original.permissions, .{});
     try cwd.rename(temporary_path, cwd, path, io);

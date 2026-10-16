@@ -73,6 +73,27 @@ touch -t 200001010000 "$tidy" "$reference"
 expect_status "unchanged: status" 0 $?
 if [ "$tidy" -nt "$reference" ]; then fail "unchanged: file was rewritten"; else pass "unchanged: not rewritten"; fi
 
+# A symlink is followed: the target is formatted and the link stays a link.
+target=$scratch_directory/target.bs
+link=$scratch_directory/link.bs
+cp fmt/example.bs "$target"
+ln -s target.bs "$link"
+"$bs_binary" fmt "$link"
+expect_status "symlink: status" 0 $?
+if [ -L "$link" ]; then pass "symlink: still a link"; else fail "symlink: link replaced by a file"; fi
+if cmp -s fmt/example.expected "$target"; then pass "symlink: target formatted"; else fail "symlink: target not formatted"; fi
+
+# An existing FILE.bs-fmt is never overwritten or deleted.
+precious=$scratch_directory/precious.bs
+cp fmt/example.bs "$precious"
+echo keep >"$precious.bs-fmt"
+chmod 444 "$precious.bs-fmt"
+"$bs_binary" fmt "$precious" 2>"$scratch_directory/stderr"
+expect_status "existing temporary file: status" 1 $?
+if [ "$(cat "$precious.bs-fmt" 2>/dev/null)" = keep ]; then pass "existing temporary file: kept"; else fail "existing temporary file: overwritten or deleted"; fi
+if cmp -s fmt/example.bs "$precious"; then pass "existing temporary file: original untouched"; else fail "existing temporary file: original modified"; fi
+if grep -q "^bs: fmt: .*/precious.bs.bs-fmt: already exists" "$scratch_directory/stderr"; then pass "existing temporary file: message"; else fail "existing temporary file: message"; cat "$scratch_directory/stderr"; fi
+
 # --check lists the files that would change and writes nothing.
 cp fmt/example.bs "$messy"
 check_output=$("$bs_binary" fmt --check "$tidy" "$messy")

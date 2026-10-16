@@ -113,6 +113,9 @@ const Printer = struct {
     follows_left_brace: bool = false,
     /// Indentation level of the line being written.
     line_level: usize = 0,
+    /// Output length after the last token or comment. Blanks before it
+    /// belong to a word (`a\ `) and are never trimmed.
+    content_length: usize = 0,
 
     fn innermost(printer: *const Printer) Context {
         return printer.contexts.items[printer.contexts.items.len - 1];
@@ -198,15 +201,21 @@ const Printer = struct {
     fn printComment(printer: *Printer, comment: Token, is_after_code: bool) Allocator.Error!void {
         if (is_after_code) try printer.output.append(printer.allocator, ' ');
         try printer.output.appendSlice(printer.allocator, trimTrailingBlanks(tokenText(printer.source_text, comment)));
+        printer.content_length = printer.output.items.len;
         printer.follows_left_brace = false;
     }
 
     fn printToken(printer: *Printer, tokens: []const Token, index: usize) Allocator.Error!void {
         const token = tokens[index];
         try printer.output.appendSlice(printer.allocator, tokenText(printer.source_text, token));
+        printer.content_length = printer.output.items.len;
         switch (token.tag) {
             .left_brace, .left_paren, .left_bracket => {
-                const following_tag = tokens[index + 1].tag; // `.end_of_input` is always last
+                // A `;` here is dropped (rule 6), so it cannot decide the
+                // layout; skipping it keeps formatting idempotent.
+                var following_index = index + 1;
+                while (tokens[following_index].tag == .semicolon) following_index += 1; // `.end_of_input` is always last
+                const following_tag = tokens[following_index].tag;
                 try printer.contexts.append(printer.allocator, .{
                     .opener = token.tag,
                     .contents_level = printer.line_level + 1,
@@ -226,7 +235,8 @@ const Printer = struct {
     }
 
     fn trimOutputBlanks(printer: *Printer) void {
-        printer.output.shrinkRetainingCapacity(trimTrailingBlanks(printer.output.items).len);
+        const trimmed_length = @max(trimTrailingBlanks(printer.output.items).len, printer.content_length);
+        printer.output.shrinkRetainingCapacity(trimmed_length);
     }
 };
 
@@ -425,6 +435,17 @@ test "comments in every position" {
 test "tabs and UTF-8" {
     try expectFormat("f = {\n\ta\n}\n", "f = {\n  a\n}\n");
     try expectFormat("echo 'a\tb' \"é\" # ünïcode\t\n", "echo 'a\tb' \"é\" # ünïcode\n");
+}
+
+test "an escaped blank at the end of a line is part of its word" {
+    try expectFormat("echo a\\ \necho b\n", "echo a\\ \necho b\n");
+    try expectFormat("echo a\\\t\n", "echo a\\\t\n");
+    try expectFormat("echo a\\ ", "echo a\\ \n");
+}
+
+test "a ; right after { does not decide the block's layout" {
+    try expectFormat("f = {;\n  a; b\n}\n", "f = {\n  a\n  b\n}\n");
+    try expectFormat("f = { ;# c\n  a; b\n}\n", "f = { # c\n  a\n  b\n}\n");
 }
 
 test "carriage returns are kept" {
