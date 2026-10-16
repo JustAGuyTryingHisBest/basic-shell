@@ -16,6 +16,7 @@ pub const Script = struct {
 pub const Statement = union(enum) {
     definition: *Definition,
     signature: *Signature,
+    data_declaration: *DataDeclaration,
     expression: *Expression,
 };
 
@@ -44,6 +45,22 @@ pub const Signature = struct {
     source_offset: u32,
     name: []const u8,
     type_expression: *TypeExpression,
+};
+
+/// A sum type `data Maybe a = Nothing | Just a`.
+pub const DataDeclaration = struct {
+    source_offset: u32,
+    name: []const u8,
+    type_parameters: []const []const u8,
+    constructors: []const ConstructorDeclaration,
+};
+
+/// One alternative of a `data` declaration, such as `Just a`.
+pub const ConstructorDeclaration = struct {
+    source_offset: u32,
+    name: []const u8,
+    /// Parsed but not yet checked (spec §6).
+    field_types: []const *TypeExpression,
 };
 
 /// Parsed but not yet checked (spec §6).
@@ -212,17 +229,17 @@ pub const Builtin = enum {
     }
 };
 
-/// Number of fields of a constructor every script can use (spec §5.2):
-/// `data Status = Ok | Fail Int` and `data Bool = False | True`.
-pub fn constructorArity(name: []const u8) ?usize {
-    const arities = std.StaticStringMap(usize).initComptime(.{
-        .{ "Ok", 0 },
-        .{ "Fail", 1 },
-        .{ "True", 0 },
-        .{ "False", 0 },
-    });
-    return arities.get(name);
-}
+/// Constructors every script can use, with their number of fields (spec
+/// §5.2): `data Status = Ok | Fail Int` and `data Bool = False | True`.
+pub const builtin_constructors = [_]struct { name: []const u8, arity: usize }{
+    .{ .name = "Ok", .arity = 0 },
+    .{ .name = "Fail", .arity = 1 },
+    .{ .name = "True", .arity = 0 },
+    .{ .name = "False", .arity = 0 },
+};
+
+/// Types every script can use; a `data` declaration cannot redefine them.
+pub const builtin_type_names = [_][]const u8{ "String", "Int", "Bool", "Status", "IO" };
 
 /// Writes one S-expression line per top-level statement; used by tests.
 pub fn dumpScript(writer: *std.Io.Writer, script: *const Script) std.Io.Writer.Error!void {
@@ -245,6 +262,19 @@ pub fn dumpStatement(writer: *std.Io.Writer, statement: Statement) std.Io.Writer
         .signature => |signature| {
             try writer.print("(sig {s} ", .{signature.name});
             try dumpType(writer, signature.type_expression);
+            try writer.writeByte(')');
+        },
+        .data_declaration => |data_declaration| {
+            try writer.print("(data {s}", .{data_declaration.name});
+            for (data_declaration.type_parameters) |type_parameter| try writer.print(" {s}", .{type_parameter});
+            for (data_declaration.constructors) |constructor| {
+                try writer.print(" ({s}", .{constructor.name});
+                for (constructor.field_types) |field_type| {
+                    try writer.writeByte(' ');
+                    try dumpType(writer, field_type);
+                }
+                try writer.writeByte(')');
+            }
             try writer.writeByte(')');
         },
         .expression => |expression| try dumpExpression(writer, expression),

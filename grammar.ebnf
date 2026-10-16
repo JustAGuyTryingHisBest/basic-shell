@@ -52,7 +52,11 @@ parameter = identifier | WILDCARD ;
 (* ---------------------------------------------------------------- *)
 
 (* data Maybe a = Nothing | Just a
-   data Service = Service { name :: String ; port :: Int } *)
+   data Service = Service { name :: String ; port :: Int }
+
+   Only top-level declarations are allowed. Constructor names are unique
+   across the script, including the built-in Ok, Fail, True and False.
+   Record fields are not supported yet. *)
 data_declaration
   = KEYWORD_DATA , constructor_identifier , { identifier } ,
     "=" , constructor , { "|" , constructor }

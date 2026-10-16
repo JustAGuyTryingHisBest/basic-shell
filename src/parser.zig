@@ -121,7 +121,7 @@ const Parser = struct {
 
     fn parseGlobalStatement(parser: *Parser) ParseError!ast.Statement {
         switch (parser.peekTag()) {
-            .keyword_data => return parser.fail(parser.peek(), "data declarations are not supported yet", .{}),
+            .keyword_data => return .{ .data_declaration = try parser.parseDataDeclaration() },
             .keyword_main => {
                 if (parser.peekTagAfter(1) == .double_colon) return parser.parseSignature();
                 const main_token = parser.advance();
@@ -143,6 +143,8 @@ const Parser = struct {
     }
 
     fn parseLocalStatement(parser: *Parser) ParseError!ast.Statement {
+        // Accepted here so `resolve` can say where they belong.
+        if (parser.peekTag() == .keyword_data) return .{ .data_declaration = try parser.parseDataDeclaration() };
         if (parser.peekIsIdentifier() and parser.isDefinitionAhead()) {
             return .{ .definition = try parser.parseDefinition() };
         }
@@ -209,6 +211,54 @@ const Parser = struct {
         const name = token.plainText();
         if (std.mem.startsWith(u8, name, "__")) return parser.fail(token, "names starting with '__' are reserved", .{});
         return name;
+    }
+
+    fn peekIsConstructor(parser: *const Parser) bool {
+        const token = parser.peek();
+        return token.tag == .word and token.is_plain and lexer.classifyPlainWord(token.plainText()) == .constructor;
+    }
+
+    /// `data Maybe a = Nothing | Just a`.
+    fn parseDataDeclaration(parser: *Parser) ParseError!*ast.DataDeclaration {
+        const data_token = parser.advance();
+        if (!parser.peekIsConstructor()) {
+            return parser.fail(parser.peek(), "expected a type name starting with an uppercase letter, found {s}", .{lexer.describeTag(parser.peekTag())});
+        }
+        const name = parser.advance().plainText();
+        var type_parameters: std.ArrayList([]const u8) = .empty;
+        while (parser.peekIsIdentifier()) {
+            try type_parameters.append(parser.allocator, try parser.checkedName(parser.advance()));
+        }
+        _ = try parser.expect(.equals, "a type variable or '='");
+        var constructors: std.ArrayList(ast.ConstructorDeclaration) = .empty;
+        try constructors.append(parser.allocator, try parser.parseConstructorDeclaration());
+        while (parser.peekTag() == .pipe) {
+            _ = parser.advance();
+            try constructors.append(parser.allocator, try parser.parseConstructorDeclaration());
+        }
+        const data_declaration = try parser.allocator.create(ast.DataDeclaration);
+        data_declaration.* = .{
+            .source_offset = data_token.source_offset,
+            .name = name,
+            .type_parameters = try type_parameters.toOwnedSlice(parser.allocator),
+            .constructors = try constructors.toOwnedSlice(parser.allocator),
+        };
+        return data_declaration;
+    }
+
+    fn parseConstructorDeclaration(parser: *Parser) ParseError!ast.ConstructorDeclaration {
+        if (!parser.peekIsConstructor()) {
+            return parser.fail(parser.peek(), "expected a constructor name starting with an uppercase letter, found {s}", .{lexer.describeTag(parser.peekTag())});
+        }
+        const name_token = parser.advance();
+        if (parser.peekTag() == .left_brace) return parser.fail(parser.peek(), "record declarations are not supported yet", .{});
+        var field_types: std.ArrayList(*ast.TypeExpression) = .empty;
+        while (parser.startsTypeAtom()) try field_types.append(parser.allocator, try parser.parseTypeAtom());
+        return .{
+            .source_offset = name_token.source_offset,
+            .name = name_token.plainText(),
+            .field_types = try field_types.toOwnedSlice(parser.allocator),
+        };
     }
 
     fn parseSignature(parser: *Parser) ParseError!ast.Statement {
@@ -406,7 +456,7 @@ const Parser = struct {
 
     fn parsePattern(parser: *Parser) ParseError!*ast.Pattern {
         const token = parser.peek();
-        if (token.tag == .word and token.is_plain and lexer.classifyPlainWord(token.plainText()) == .constructor) {
+        if (parser.peekIsConstructor()) {
             _ = parser.advance();
             var fields: std.ArrayList(*ast.Pattern) = .empty;
             while (startsPatternAtom(parser.peekTag())) try fields.append(parser.allocator, try parser.parsePatternAtom());
@@ -561,12 +611,25 @@ test "type signatures" {
     try expectParse("wait_for :: String -> Int -> IO Status", "(sig wait_for (-> String (-> Int (IO Status))))\n");
 }
 
+test "data declarations" {
+    try expectParse("data Maybe a = Nothing | Just a", "(data Maybe a (Nothing) (Just a))\n");
+    try expectParse(
+        "data Shape = Circle Int\n  | Rect Int Int\n  | Poly [(Maybe Int)]",
+        "(data Shape (Circle Int) (Rect Int Int) (Poly [(Maybe Int)]))\n",
+    );
+    try expectParse("data Pair a b = Pair a (a -> b)", "(data Pair a b (Pair a (-> a b)))\n");
+}
+
 test "separators" {
     try expectParse("a; b\n\nc", "a\nb\nc\n");
 }
 
 test "syntax errors are all reported" {
-    try expectParseErrors("data T = A", &.{"data declarations are not supported yet"});
+    try expectParseErrors("data t = A", &.{"expected a type name starting with an uppercase letter, found a word"});
+    try expectParseErrors("data T = a", &.{"expected a constructor name starting with an uppercase letter, found a word"});
+    try expectParseErrors("data T = A |", &.{"expected a constructor name starting with an uppercase letter, found the end of the input"});
+    try expectParseErrors("data T A = A", &.{"expected a type variable or '=', found a word"});
+    try expectParseErrors("data T = T { x :: Int }", &.{"record declarations are not supported yet"});
     try expectParseErrors("f (a", &.{"expected ')', found the end of the input"});
     try expectParseErrors("x = )\ny = )", &.{ "expected an expression, found ')'", "expected an expression, found ')'" });
     try expectParseErrors("f { a }", &.{"expected a new line or ';' before '{'"});

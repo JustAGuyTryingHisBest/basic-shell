@@ -1,0 +1,29 @@
+data Shape = Circle Int
+  | Rect Int Int
+  | Dot
+
+describe s = match s {
+  Circle r -> echo "circle of radius $r"
+  Rect w h -> echo "rect $w by $h"
+  Dot -> echo dot
+}
+
+area s = match s {
+  Circle r -> add r r
+  Rect w h -> add w h
+  Dot -> 0
+}
+
+for [Circle 2, Rect 3 4, Dot] describe
+echo (area (Rect 3 4))
+
+data Maybe a = Nothing | Just a
+
+find_first xs = match xs {
+  [] -> Nothing
+  [x] -> Just x
+  _ -> Just "many"
+}
+
+match find_first [] { Nothing -> echo nothing; Just x -> echo $x }
+match find_first ["a"] { Nothing -> echo nothing; Just x -> echo $x }

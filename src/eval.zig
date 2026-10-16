@@ -153,7 +153,7 @@ pub const Interpreter = struct {
         interpreter.global_environment = try interpreter.bind(null, "args", .{ .list = argument_values });
 
         for (script.statements) |statement| switch (statement) {
-            .signature => {},
+            .signature, .data_declaration => {},
             .definition => |definition| {
                 if (definition.isFunction() or definition == script.main) continue;
                 const bound_value = try interpreter.evalExpression(definition.body, interpreter.global_environment);
@@ -227,7 +227,7 @@ pub const Interpreter = struct {
         for (statements, 0..) |statement, index| {
             const is_last = index + 1 == statements.len;
             switch (statement) {
-                .signature => {},
+                .signature, .data_declaration => {},
                 .definition => |definition| {
                     const bound_value = try interpreter.evalExpression(definition.body, current_environment);
                     current_environment = try interpreter.bind(current_environment, definition.name, bound_value);
@@ -684,6 +684,17 @@ test "blocks are values and bindings shadow" {
 
 test "tail recursion" {
     try expectOutput("count n = match lt n 100000 {\n  True -> count (add n 1)\n  False -> echo $n\n}\ncount 0\n", "100000\n");
+}
+
+test "user data types" {
+    try expectOutput(
+        "data Maybe a = Nothing | Just a\nshow m = match m {\n  Nothing -> echo none\n  Just (Just x) -> echo \"nested $x\"\n  Just x -> echo \"just $x\"\n}\nshow Nothing\nshow (Just 4)\nshow (Just (Just 5))\n",
+        "none\njust 4\nnested 5\n",
+    );
+}
+
+test "a constructor can be used before its declaration" {
+    try expectOutput("x = Box [1, 2]\nmatch x { Box [a, b] -> echo $a $b }\ndata Box a = Box a\n", "1 2\n");
 }
 
 test "a Fail value is caught by an outer match" {

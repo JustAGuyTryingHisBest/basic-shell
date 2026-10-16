@@ -1,0 +1,3 @@
+data Light = Red | Green
+
+match Green { Red -> echo stop }

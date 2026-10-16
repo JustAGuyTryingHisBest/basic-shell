@@ -1,0 +1,3 @@
+data_error.bs:3:7: error: no match arm fits Green
+    3 | match Green { Red -> echo stop }
+      |       ^

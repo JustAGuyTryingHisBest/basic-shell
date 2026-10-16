@@ -59,6 +59,10 @@ const Resolver = struct {
     diagnostics: *Diagnostics,
     /// Top-level definitions with parameters, visible everywhere.
     functions: std.StringHashMapUnmanaged(*ast.Definition) = .empty,
+    /// Every constructor, built in or declared by `data`, with its number
+    /// of fields. Declarations are hoisted, so this is complete before any
+    /// expression is resolved.
+    constructor_arities: std.StringHashMapUnmanaged(usize) = .empty,
 
     fn report(resolver: *Resolver, source_offset: u32, comptime format: []const u8, arguments: anytype) Allocator.Error!void {
         try resolver.diagnostics.add(source_offset, 1, format, arguments);
@@ -71,6 +75,8 @@ const Resolver = struct {
     }
 
     fn resolveScript(resolver: *Resolver, script: *ast.Script) Allocator.Error!void {
+        try resolver.collectConstructors(script.statements);
+
         // Hoist functions, find `main`, and reject duplicate top-level names.
         var top_level_names: std.StringHashMapUnmanaged(void) = .empty;
         for (script.statements) |statement| {
@@ -99,7 +105,7 @@ const Resolver = struct {
 
         var scope: ?*const Scope = try resolver.extend(null, "args");
         for (script.statements) |statement| switch (statement) {
-            .signature => {},
+            .signature, .data_declaration => {},
             .expression => |expression| try resolver.resolveExpression(expression, scope, .statement),
             .definition => |definition| {
                 const runs_as_function = definition.isFunction() or definition == script.main;
@@ -107,6 +113,41 @@ const Resolver = struct {
                 if (!runs_as_function) scope = try resolver.extend(scope, definition.name);
             },
         };
+    }
+
+    /// Registers the built-in constructors and those of every top-level
+    /// `data` declaration, rejecting duplicate type and constructor names.
+    fn collectConstructors(resolver: *Resolver, statements: []const ast.Statement) Allocator.Error!void {
+        for (ast.builtin_constructors) |constructor| {
+            try resolver.constructor_arities.put(resolver.allocator, constructor.name, constructor.arity);
+        }
+        var type_names: std.StringHashMapUnmanaged(void) = .empty;
+        for (ast.builtin_type_names) |type_name| try type_names.put(resolver.allocator, type_name, {});
+        for (statements) |statement| {
+            const data_declaration = switch (statement) {
+                .data_declaration => |data_declaration| data_declaration,
+                else => continue,
+            };
+            if ((try type_names.getOrPut(resolver.allocator, data_declaration.name)).found_existing) {
+                try resolver.report(data_declaration.source_offset, "type '{s}' is already defined", .{data_declaration.name});
+            }
+            for (data_declaration.type_parameters, 0..) |type_parameter, index| {
+                for (data_declaration.type_parameters[0..index]) |earlier_type_parameter| {
+                    if (std.mem.eql(u8, type_parameter, earlier_type_parameter)) {
+                        try resolver.report(data_declaration.source_offset, "type variable '{s}' appears twice in '{s}'", .{ type_parameter, data_declaration.name });
+                        break;
+                    }
+                }
+            }
+            for (data_declaration.constructors) |constructor| {
+                const entry = try resolver.constructor_arities.getOrPut(resolver.allocator, constructor.name);
+                if (entry.found_existing) {
+                    try resolver.report(constructor.source_offset, "constructor '{s}' is already defined", .{constructor.name});
+                    continue;
+                }
+                entry.value_ptr.* = constructor.field_types.len;
+            }
+        }
     }
 
     fn resolveDefinitionBody(resolver: *Resolver, definition: *ast.Definition, scope: ?*const Scope, runs_as_function: bool) Allocator.Error!void {
@@ -123,6 +164,7 @@ const Resolver = struct {
         var block_scope = scope;
         for (statements) |statement| switch (statement) {
             .signature => |signature| try resolver.report(signature.source_offset, "type signatures are only allowed at the top level", .{}),
+            .data_declaration => |data_declaration| try resolver.report(data_declaration.source_offset, "data declarations are only allowed at the top level", .{}),
             .expression => |expression| try resolver.resolveExpression(expression, block_scope, .statement),
             .definition => |definition| {
                 if (definition.isFunction()) {
@@ -174,7 +216,7 @@ const Resolver = struct {
                 expression.data = .{ .literal_string = text };
             },
             .constructor => {
-                if (!isHeadSlot(slot) and ast.constructorArity(text) == null) {
+                if (!isHeadSlot(slot) and !resolver.constructor_arities.contains(text)) {
                     return resolver.report(expression.source_offset, "undefined constructor '{s}'", .{text});
                 }
                 try resolver.resolveLoneWordAsCall(expression, scope, if (isHeadSlot(slot)) slot else .value);
@@ -285,7 +327,7 @@ const Resolver = struct {
                     call.head_kind = .external;
                 }
             },
-            .constructor => call.head_kind = if (ast.constructorArity(name) != null) .constructor else .external,
+            .constructor => call.head_kind = if (resolver.constructor_arities.contains(name)) .constructor else .external,
             .integer, .literal => call.head_kind = .external,
         }
     }
@@ -300,7 +342,7 @@ const Resolver = struct {
                 }
             },
             .constructor => {
-                const expected = ast.constructorArity(call.name).?;
+                const expected = resolver.constructor_arities.get(call.name).?;
                 if (argument_count != expected) {
                     try resolver.report(source_offset, "'{s}' takes {d} field{s}, got {d}", .{ call.name, expected, plural(expected), argument_count });
                 }
@@ -335,7 +377,7 @@ const Resolver = struct {
             .wildcard, .literal_string, .literal_integer => return scope,
             .binder => |name| return try resolver.extend(scope, name),
             .constructor => |constructor| {
-                if (ast.constructorArity(constructor.name)) |expected| {
+                if (resolver.constructor_arities.get(constructor.name)) |expected| {
                     if (expected != constructor.fields.len) {
                         try resolver.report(pattern.source_offset, "'{s}' takes {d} field{s}, got {d}", .{ constructor.name, expected, plural(expected), constructor.fields.len });
                     }
@@ -469,6 +511,25 @@ test "interpolation and environment variables" {
         "name = \"eth0\"\necho \"eth $name\" $HOME",
         "(def name () 'eth0')\n(builtin echo (interp 'eth ' $name) $HOME?)\n",
     );
+}
+
+test "user constructors" {
+    try expectResolved(
+        "show m = match m { Nothing -> echo none; Just x -> echo $x }\nshow (Just 3)\ndata Maybe a = Nothing | Just a",
+        "(def show (m) (match $m (Nothing -> (builtin echo 'none')) ((Just x) -> (builtin echo $x))))\n(function show (constructor Just 3))\n(data Maybe a (Nothing) (Just a))\n",
+    );
+    try expectResolved("data T = A | B\nx = A\nf A", "(data T (A) (B))\n(def x () (constructor A))\n(external:status f 'A')\n");
+}
+
+test "data declaration errors" {
+    try expectResolveErrors("data T = A Int\nA", &.{"'A' takes 1 field, got 0"});
+    try expectResolveErrors("data T = A\nmatch A { A x -> skip }", &.{"'A' takes 0 fields, got 1"});
+    try expectResolveErrors("data T = A\ndata T = B", &.{"type 'T' is already defined"});
+    try expectResolveErrors("data T = A | A", &.{"constructor 'A' is already defined"});
+    try expectResolveErrors("data T = Ok", &.{"constructor 'Ok' is already defined"});
+    try expectResolveErrors("data Bool = Yes | No", &.{"type 'Bool' is already defined"});
+    try expectResolveErrors("data P a a = P a", &.{"type variable 'a' appears twice in 'P'"});
+    try expectResolveErrors("f x = {\n  data T = A\n  skip\n}", &.{"data declarations are only allowed at the top level"});
 }
 
 test "resolve errors" {
